@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "rubiks-nn-app: a neural network Rubik's cube solver web app"
+authors:
+  - family-names: Mutescul
+    given-names: Alexandru
+year: 2026
+repository-code: "https://github.com/alexandrumutescul/rubiks-nn-app"
+license: MIT

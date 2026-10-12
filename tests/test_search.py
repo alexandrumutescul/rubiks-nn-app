@@ -157,7 +157,7 @@ def test_bad_inputs():
         search.beam_search(bad_shape, cube.apply_move(cube.SOLVED, 0), device="cpu")
 
 
-# --- policies with saturated / -inf outputs, and beam-ordering properties (review fix round 1) -------------------
+# --- policies with saturated / -inf outputs, and beam-ordering properties ------------------------------------
 
 def _table_policy(table: dict[bytes, dict[int, float]], default: float):
     """Log-probabilities from a lookup: ``table[state][move]``; unlisted states/moves get ``default``."""

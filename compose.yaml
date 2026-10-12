@@ -1,0 +1,19 @@
+# docker compose up            -> builds the image on first use, serves http://localhost:8765/
+# PORT=9000 docker compose up  -> another host port (compose does not look for a free port; ./run.sh does)
+services:
+  rubiks-nn-app:
+    build: .
+    image: rubiks-nn-app
+    container_name: rubiks-nn-app
+    ports:
+      - "${PORT:-8765}:8765"
+    environment:
+      BEAM: "${BEAM:-1024}"
+      MAX_DEPTH: "${MAX_DEPTH:-40}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; d = json.load(urllib.request.urlopen('http://127.0.0.1:8765/solver', timeout=4)); raise SystemExit(0 if d.get('backend') == 'policy' else 1)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped

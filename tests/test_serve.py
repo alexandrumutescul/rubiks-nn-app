@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 import numpy as np
 import pytest
 
-from rubiks import cube, generate, serve, train
+from rubiks import cube, serve
 
 SCRAMBLE = cube.parse_moves("R U F' L2 D B'")
 STATE = cube.apply_sequence(cube.SOLVED, SCRAMBLE)
@@ -320,13 +320,37 @@ def test_default_backend_is_kociemba_when_importable():
 
 @pytest.fixture(scope="module")
 def tiny_checkpoint(tmp_path_factory):
-    data = tmp_path_factory.mktemp("serve-data")
-    generate.generate(generate.parse_args(["--out", str(data), "--train", "3000", "--val", "500", "--test", "50",
-                                           "--uniform", "2", "--max-depth", "3", "--seed", "7"]))
-    run = tmp_path_factory.mktemp("serve-run")
-    assert train.main(["--data", str(data), "--out", str(run), "--epochs", "1", "--hidden", "64,32", "--device",
-                       "cpu", "--batch", "256", "--lr", "3e-3", "--seed", "0", "--warmup-epochs", "0"]) == 0
-    return run / "best.pt"
+    """A tiny policy checkpoint trained in-process (the training CLI is not part of this repository): MLP
+    324 -> 64 -> 32 -> 18 on 3,000 random scrambles of depth 1..3 with the training label (the inverse of the last
+    scramble move), a few seeded AdamW epochs on CPU, saved with rubiks.model.save_checkpoint like a run's best.pt."""
+    import torch
+
+    from rubiks import data, model, sampling
+
+    states, moves, depth = sampling.random_scrambles(np.random.default_rng(7), 3000, 3)
+    last_move = moves[np.arange(len(depth)), depth.astype(np.int64) - 1]
+    x = data.encode(torch.from_numpy(states))
+    y = torch.from_numpy(data.undo_labels(last_move))
+    torch.manual_seed(0)
+    net = model.policy_mlp(hidden=(64, 32))
+    opt = torch.optim.AdamW(net.parameters(), lr=3e-3)
+    loss_fn = torch.nn.CrossEntropyLoss()
+    sampler = data.BatchSampler(len(y), 256, seed=0)
+    net.train()
+    losses = []
+    for _ in range(4):
+        for idx in sampler:
+            i = torch.from_numpy(idx)
+            loss = loss_fn(net(x[i]), y[i])
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            losses.append(loss.item())
+    assert losses[-1] < losses[0]  # it trained
+    net.eval()
+    path = tmp_path_factory.mktemp("serve-run") / "best.pt"
+    model.save_checkpoint(path, net, {"task": "policy", "n_train": 3000, "max_depth": 3}, epoch=4)
+    return path
 
 
 def test_real_policy_backend_solves_depth_one(tiny_checkpoint, tmp_path):

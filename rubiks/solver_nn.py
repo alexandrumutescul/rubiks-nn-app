@@ -1,6 +1,6 @@
 """Solver API around a trained policy checkpoint (for rubiks.serve and notebooks).
 
-    solver = NNSolver("runs/policy-v1/best.pt")          # loads once
+    solver = NNSolver("models/policy-v2.pt")          # loads once
     solver.solve(state)  # -> {"moves": [...], "notation": "R U' ...", "source": "policy-beam", "nodes": n, "ms": t}
                          #    or {"error": "...", ...}
 

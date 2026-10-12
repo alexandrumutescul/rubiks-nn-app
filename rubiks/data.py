@@ -1,6 +1,6 @@
 """Training data for the policy network: loading, the undo label, the one-hot encoding and batching.
 
-* ``load_split(dir, name)`` reads ``<dir>/<name>.npz`` (format: ``docs/DATASET-FORMAT.md``) and returns its
+* ``load_split(dir, name)`` reads ``<dir>/<name>.npz`` (format: ``the dataset format note of the research repository``) and returns its
   arrays; ``load_uniform(dir)`` returns the uniformly random test states.
 * ``undo_labels(last_move)`` is the policy label: ``inverse_move(last_move)``, the move that steps back along the
   scramble (X <-> X', X2 is its own inverse), via an 18-entry lookup table.
