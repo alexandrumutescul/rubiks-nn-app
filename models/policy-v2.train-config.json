@@ -1,0 +1,81 @@
+{
+  "args": {
+    "data": "/Users/amutescul/GitHub/rubiks-nn/data/v2",
+    "out": "runs/policy-v2",
+    "hidden": "1024,512",
+    "norm": "layer",
+    "dropout": 0.0,
+    "activation": "relu",
+    "epochs": 12,
+    "batch": 2048,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "sched": "cosine",
+    "warmup_epochs": 1.0,
+    "clip": 1.0,
+    "seed": 0,
+    "device": "mps",
+    "val_every": 1,
+    "limit_train": 0,
+    "limit_val": 0,
+    "eval_batch": 16384,
+    "deterministic": false,
+    "hidden_list": [
+      1024,
+      512
+    ]
+  },
+  "task": "policy",
+  "label": "undo = rubiks.cube.inverse_move(last_move)",
+  "encoding": "one-hot 54x6 row-major, feature = position*6 + colour",
+  "loss": "cross-entropy over 18 moves",
+  "optimizer": "AdamW(lr=0.001, weight_decay=0.0001 on Linear weights only)",
+  "schedule": "linear warm-up 4883 steps, then cosine to 0",
+  "parameters": 869906,
+  "n_train": 10000000,
+  "n_val": 100000,
+  "steps_per_epoch": 4883,
+  "total_steps": 58596,
+  "warmup_steps": 4883,
+  "device": "mps",
+  "determinism": {
+    "mode": "seeded",
+    "note": "CPU bit-reproducible; CUDA/MPS not guaranteed"
+  },
+  "torch_version": "2.14.1",
+  "numpy_version": "2.5.4",
+  "python_version": "3.12.13",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "package_version": "0.1.0",
+  "git_commit": "195bcf3cd466c56d1f9b9e80184fa74527e1de01",
+  "git_dirty": true,
+  "data": {
+    "generator_version": "1.0.0",
+    "seed": 20261012,
+    "max_depth": 20,
+    "git_commit": "594bbdbe2a20bbc433e701fb9ffd305cf5f22976",
+    "files": {
+      "train.npz": "4add18a6e6471fbf528b88c828e542a197ec0d23ec120375da303bf64b52378d",
+      "val.npz": "cd8077759f209a344ede02266740000606e8d95cb895e72d2e6315b2a7b3491b",
+      "test.npz": "4210a1cd78ccd7d431a28f851fad77d5ad0885bc9da72eb94f6845f519228927",
+      "test_uniform.npz": "aa9baf40ec627014e1ce23aa66641eeb8a06da14fb7e1e3e1f55805917c0a5db"
+    }
+  },
+  "created_utc": "2026-10-12T14:01:19Z",
+  "model": {
+    "in_features": 324,
+    "hidden": [
+      1024,
+      512
+    ],
+    "out_features": 18,
+    "norm": "layer",
+    "dropout": 0.0,
+    "activation": "relu"
+  },
+  "best": {
+    "epoch": 10,
+    "val_top1": 0.46238
+  },
+  "elapsed_s": 202.84161366696935
+}

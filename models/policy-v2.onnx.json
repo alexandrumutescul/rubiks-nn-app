@@ -1,0 +1,85 @@
+{
+  "format": "rubiks-nn policy ONNX v1",
+  "file": "policy.onnx",
+  "sha256": "a727cdd8960273b3594aaaf90c873a7cac2536dde43bcc981eadb080b7c6cf03",
+  "bytes": 3481343,
+  "input": {
+    "name": "onehot",
+    "dtype": "float32",
+    "shape": [
+      "batch",
+      324
+    ]
+  },
+  "output": {
+    "name": "logits",
+    "dtype": "float32",
+    "shape": [
+      "batch",
+      18
+    ],
+    "semantics": "unnormalised logits over move_names; softmax gives the next-move policy"
+  },
+  "encoding": "one-hot 54x6 row-major, feature = position*6 + colour",
+  "facelet_order": "Kociemba URFDLB, facelet = face*9 + row*3 + col, solved colour = facelet // 9",
+  "move_names": [
+    "U",
+    "U'",
+    "U2",
+    "R",
+    "R'",
+    "R2",
+    "F",
+    "F'",
+    "F2",
+    "D",
+    "D'",
+    "D2",
+    "L",
+    "L'",
+    "L2",
+    "B",
+    "B'",
+    "B2"
+  ],
+  "opset": 17,
+  "exporter": "dynamo",
+  "exporter_attempts": [],
+  "check": {
+    "n": 256,
+    "seed": 0,
+    "batch_sizes": [
+      256,
+      7,
+      1
+    ],
+    "max_abs_diff": 6.198883056640625e-06,
+    "tol": 0.0001,
+    "argmax_agree": 1.0,
+    "onnxruntime_version": "1.31.0",
+    "input_shape": [
+      "batch",
+      "324"
+    ],
+    "output_shape": [
+      "batch",
+      "18"
+    ]
+  },
+  "model": {
+    "in_features": 324,
+    "hidden": [
+      1024,
+      512
+    ],
+    "out_features": 18,
+    "norm": "layer",
+    "dropout": 0.0,
+    "activation": "relu"
+  },
+  "parameters": 869906,
+  "checkpoint": "runs/policy-v2/best.pt",
+  "checkpoint_epoch": 10,
+  "torch_version": "2.14.1",
+  "created_utc": "2026-10-12T14:24:30Z"
+}

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Rubik Cube Solver</title>
+<style>
+  /* ---- theme: light by default, dark from the system unless forced light, or forced dark ---- */
+  :root {
+    color-scheme: light;
+    --bg: #f3f4f6;
+    --panel: #ffffff;
+    --fg: #1b1f24;
+    --muted: #59636e;
+    --border: #d0d7de;
+    --btn-bg: #f6f8fa;
+    --btn-hover: #eaeef2;
+    --btn-fg: #1b1f24;
+    --accent: #0969da;
+    --accent-fg: #ffffff;
+    --ok: #1a7f37;
+    --warn: #7d4e00;
+    --warn-bg: #fff4c2;
+    --err: #cf222e;
+    --err-bg: #ffebe9;
+    --banner-bg: #cf222e;
+    --banner-fg: #ffffff;
+    --stage-bg: #e3e7ed;
+    --hl-bg: #ffd33d;
+    --hl-fg: #1b1f24;
+    --done: #8c959f;
+    --radius: 10px;
+    /* 2D net cell: 12 cells + 11 gaps of 2 px must fit 100vw - 2 x 16 px gutters (with slack for a scrollbar) */
+    --cell: clamp(14px, calc((100vw - 70px) / 12), 28px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --fg: #e6edf3;
+      --muted: #9198a1;
+      --border: #30363d;
+      --btn-bg: #21262d;
+      --btn-hover: #30363d;
+      --btn-fg: #e6edf3;
+      --accent: #2f81f7;
+      --accent-fg: #ffffff;
+      --ok: #3fb950;
+      --warn: #e3b341;
+      --warn-bg: #2e2412;
+      --err: #ff7b72;
+      --err-bg: #3c1618;
+      --banner-bg: #b62324;
+      --banner-fg: #ffffff;
+      --stage-bg: #1c2129;
+      --hl-bg: #d29922;
+      --hl-fg: #0d1117;
+      --done: #6e7681;
+    }
+    :root:not([data-theme="light"]) body { background: #0d1117; color: #e6edf3; }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d1117;
+    --panel: #161b22;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --border: #30363d;
+    --btn-bg: #21262d;
+    --btn-hover: #30363d;
+    --btn-fg: #e6edf3;
+    --accent: #2f81f7;
+    --accent-fg: #ffffff;
+    --ok: #3fb950;
+    --warn: #e3b341;
+    --warn-bg: #2e2412;
+    --err: #ff7b72;
+    --err-bg: #3c1618;
+    --banner-bg: #b62324;
+    --banner-fg: #ffffff;
+    --stage-bg: #1c2129;
+    --hl-bg: #d29922;
+    --hl-fg: #0d1117;
+    --done: #6e7681;
+  }
+  :root[data-theme="dark"] body { background: #0d1117; color: #e6edf3; }
+
+  /* ---- base ---- */
+  *, *::before, *::after { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { background: var(--bg); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    padding: 0 16px 32px;
+    background: #f3f4f6;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+       margin: 0 0 8px; }
+  canvas { display: block; }
+
+  .top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+         max-width: 1180px; margin: 0 auto; padding: 12px 0; }
+  .banner { max-width: 1180px; margin: 0 auto 12px; padding: 10px 12px; border-radius: 8px; font-weight: 600;
+            overflow-wrap: anywhere; }
+  .banner.error { background: var(--banner-bg); color: var(--banner-fg); }
+
+  /* ---- layout: one column on a phone (cube on top), two columns on a desktop ---- */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; max-width: 1180px; margin: 0 auto; }
+  .viz { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; min-width: 0; }
+  .controls { min-width: 0; }
+  @media (min-width: 900px) {
+    .layout { grid-template-columns: minmax(0, 1fr) minmax(320px, 400px); align-items: start; }
+    .viz { position: sticky; top: 12px; }
+  }
+
+  /* ---- 3D stage ---- */
+  .stage { position: relative; flex: 1 1 300px; min-width: 0; width: 100%; aspect-ratio: 1 / 1; max-height: 75vh;
+           border-radius: var(--radius); background: var(--stage-bg); overflow: hidden; }
+  .stage canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+  .stage canvas:active { cursor: grabbing; }
+  .stage-btn { position: absolute; right: 8px; bottom: 8px; }
+  .stage-note { margin: 0; padding: 12px; color: var(--muted); }
+  .stage.no-3d { aspect-ratio: auto; max-height: none; height: auto !important; }
+  .stage.no-3d canvas, .stage.no-3d .stage-btn { display: none; }
+
+  /* ---- 2D net (cells placed from CUBE_TABLES.net_pos; colours from CUBE_TABLES.colours) ---- */
+  .net-box { flex: 0 0 auto; max-width: 100%; display: flex; flex-direction: column; gap: 6px; }
+  .net { display: grid; gap: 2px; width: max-content; max-width: 100%; }
+  .cell { width: var(--cell); height: var(--cell); border-radius: 3px; display: flex; align-items: center;
+          justify-content: center; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .28); background: #888;
+          font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .cell[data-c="0"] { background: var(--sticker-0); }
+  .cell[data-c="1"] { background: var(--sticker-1); }
+  .cell[data-c="2"] { background: var(--sticker-2); }
+  .cell[data-c="3"] { background: var(--sticker-3); }
+  .cell[data-c="4"] { background: var(--sticker-4); }
+  .cell[data-c="5"] { background: var(--sticker-5); }
+  .cell .idx, .cell .face-letter { background: rgba(0, 0, 0, .6); color: #fff; border-radius: 3px; padding: 1px 2px; }
+  .cell .idx { display: none; }
+  .net.show-idx .cell .idx { display: inline; }
+  .net.show-idx .cell .face-letter { display: none; }
+
+  /* ---- controls ---- */
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px;
+           margin-bottom: 12px; min-width: 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 8px; }
+  .btn { font: inherit; font-size: 16px; min-height: 40px; padding: 6px 14px; border-radius: 8px;
+         border: 1px solid var(--border); background: var(--btn-bg); color: var(--btn-fg); cursor: pointer;
+         touch-action: manipulation; }
+  .btn:hover:not(:disabled) { background: var(--btn-hover); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  .btn.warn { border-color: var(--warn); color: var(--warn); margin-top: 8px; }
+  .btn.small { font-size: 14px; min-height: 32px; padding: 4px 10px; }
+  .link { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline;
+          cursor: pointer; }
+
+  .moves { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  @media (min-width: 560px) and (max-width: 899px) { .moves { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .face-group { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding-left: 6px;
+                border-left: 6px solid #888; box-shadow: -1px 0 0 var(--border); min-width: 0; }
+  .face-group[data-c="0"] { border-left-color: var(--sticker-0); }
+  .face-group[data-c="1"] { border-left-color: var(--sticker-1); }
+  .face-group[data-c="2"] { border-left-color: var(--sticker-2); }
+  .face-group[data-c="3"] { border-left-color: var(--sticker-3); }
+  .face-group[data-c="4"] { border-left-color: var(--sticker-4); }
+  .face-group[data-c="5"] { border-left-color: var(--sticker-5); }
+  .btn.move { padding: 6px 0; min-width: 0; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 140px; min-width: 0; font-size: 13px;
+           color: var(--muted); }
+  .field.narrow { flex: 0 1 96px; }
+  .field.full { flex-basis: 100%; }
+  input[type="text"], input[type="number"], input[type="url"], select, textarea {
+    font: inherit; font-size: 16px; color: var(--fg); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; width: 100%; max-width: 100%; min-width: 0; min-height: 40px;
+  }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical;
+             word-break: break-all; overflow-wrap: anywhere; }
+  input:disabled, select:disabled { opacity: .55; }
+  .speed { align-items: center; }
+  .speed .label { font-size: 13px; color: var(--muted); }
+  .speed label { display: inline-flex; align-items: center; gap: 4px; min-height: 40px; padding: 0 4px; }
+
+  .status { font-size: 14px; }
+  #verify.ok { color: var(--ok); font-weight: 600; }
+  #verify.bad { color: var(--err); font-weight: 700; }
+  .msg { margin-top: 6px; min-height: 1.45em; overflow-wrap: anywhere; }
+  .msg.error { color: var(--err); background: var(--err-bg); padding: 6px 8px; border-radius: 6px; }
+  .msg.warn { color: var(--warn); background: var(--warn-bg); padding: 6px 8px; border-radius: 6px; }
+  .msg.ok { color: var(--ok); font-weight: 600; }
+
+  .seq-label { margin-top: 10px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+  .seq { display: flex; flex-wrap: wrap; gap: 4px; min-height: 34px; max-height: 140px; overflow-y: auto;
+         margin-top: 4px; padding: 6px; border: 1px dashed var(--border); border-radius: 8px;
+         font: 15px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .mv { padding: 1px 5px; border-radius: 4px; background: var(--btn-bg); }
+  .mv.current { background: var(--hl-bg); color: var(--hl-fg); font-weight: 700; }
+  .mv.done { color: var(--done); }
+  .more { color: var(--muted); font-family: system-ui, sans-serif; font-size: 13px; padding: 1px 2px; }
+  .hint { font-size: 13px; color: var(--muted); margin: 8px 0 0; overflow-wrap: anywhere; }
+
+  footer { max-width: 1180px; margin: 8px auto 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  footer p { margin: 4px 0; }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>Rubik Cube Solver</h1>
+  <button id="theme" class="btn small" type="button" title="Switch between the system theme, light and dark">Theme: auto</button>
+</header>
+
+<div id="banner" class="banner" role="alert" hidden></div>
+<noscript><div class="banner error">This page needs JavaScript.</div></noscript>
+
+<main class="layout">
+  <section class="viz" aria-label="Cube">
+    <div class="stage" id="stage">
+      <canvas id="cube3d" aria-label="3D cube; drag to rotate the view"></canvas>
+      <p class="stage-note" id="stage-note" hidden></p>
+      <button id="view-reset" class="btn small stage-btn" type="button">Reset view</button>
+    </div>
+    <div class="net-box">
+      <div class="net" id="net" role="img" aria-label="2D net of the cube: U on top, then L F R B, D below"></div>
+      <label class="hint"><input type="checkbox" id="show-idx"> show facelet indices (Kociemba order, U1 = 0 ... B9 = 53)</label>
+    </div>
+  </section>
+
+  <section class="controls" aria-label="Controls">
+    <div class="panel status">
+      <div id="verify">checking tables…</div>
+      <div><span id="since"></span> · <span id="last-solve"></span></div>
+      <div id="msg" class="msg" aria-live="polite"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Turn</h2>
+      <div class="moves" id="moves"></div>
+      <div class="row">
+        <button id="undo" class="btn" type="button">Undo</button>
+        <button id="reset" class="btn" type="button" data-lock>Reset</button>
+      </div>
+      <div class="row speed" role="radiogroup" aria-label="Animation speed">
+        <span class="label">Speed</span>
+        <label><input type="radio" name="speed" value="slow"> Slow</label>
+        <label><input type="radio" name="speed" value="normal"> Normal</label>
+        <label><input type="radio" name="speed" value="fast"> Fast</label>
+      </div>
+      <p class="hint">Keys: u r f d l b turn a face clockwise, Shift + letter counter-clockwise, 2 then a letter a half turn. <span id="key-hint"></span></p>
+    </div>
+
+    <div class="panel">
+      <h2>Scramble</h2>
+      <div class="row">
+        <label class="field narrow">Depth
+          <input id="depth" type="number" min="1" max="200" step="1" value="20" inputmode="numeric" data-lock>
+        </label>
+        <label class="field">Seed (empty = random)
+          <input id="seed" type="text" inputmode="numeric" placeholder="random" autocomplete="off" spellcheck="false" data-lock>
+        </label>
+      </div>
+      <div class="row">
+        <button id="scramble" class="btn" type="button" data-lock>Scramble</button>
+        <button id="random" class="btn" type="button" data-lock>Random state</button>
+      </div>
+      <p class="hint" id="scramble-text">Scramble uses the dataset generator's canonical filter; Random state picks one of the exported uniformly random reachable states.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Solve</h2>
+      <div class="row">
+        <label class="field full">Backend
+          <select id="backend" data-lock></select>
+        </label>
+      </div>
+      <div class="row" id="remote-row">
+        <label class="field full">Solver URL (POST {"state": [54 ints]})
+          <input id="remote-url" type="url" autocomplete="off" spellcheck="false" data-lock>
+        </label>
+      </div>
+      <div class="row">
+        <button id="solve" class="btn primary" type="button" data-lock>Solve</button>
+        <button id="stop" class="btn" type="button">Stop</button>
+      </div>
+      <div class="seq-label">Solution <span id="solution-meta"></span></div>
+      <div class="seq" id="solution" aria-live="polite"></div>
+      <button id="animate-anyway" class="btn warn" type="button" hidden>Animate anyway</button>
+    </div>
+
+    <div class="panel">
+      <h2>Moves and state</h2>
+      <div class="row">
+        <label class="field">Type a move sequence
+          <input id="typed" type="text" placeholder="R U R' U'" autocomplete="off" autocapitalize="characters"
+                 autocorrect="off" spellcheck="false" data-lock>
+        </label>
+        <button id="apply" class="btn" type="button" data-lock>Apply</button>
+      </div>
+      <div class="seq-label">History (since the last Reset, Scramble, Random state or Load)</div>
+      <div class="seq" id="history"></div>
+      <div class="row">
+        <label class="field full">State as a 54-character Kociemba facelet string (U R F D L B)
+          <textarea id="facelets" rows="2" spellcheck="false" autocomplete="off" autocapitalize="characters"
+                    autocorrect="off"></textarea>
+        </label>
+      </div>
+      <div class="row">
+        <button id="copy" class="btn" type="button">Copy</button>
+        <button id="load" class="btn" type="button" data-lock>Load</button>
+      </div>
+      <p id="facelets-hint" class="hint" hidden>Edited: press Load (or Enter) to apply it, or
+        <button id="facelets-revert" class="link" type="button">revert</button>.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>Drag the cube to rotate the view. The 54-sticker state is the truth; the 3D view and the net re-colour from it.
+     Every cube table comes from <code>rubiks/cube.py</code> via <code>python -m rubiks.export_web</code>.</p>
+  <p id="generated"></p>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" referrerpolicy="no-referrer"></script>
+<script src="cube-tables.js"></script>
+<script src="solver.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
