@@ -139,7 +139,7 @@
       input.addEventListener('change', function () {
         const f = input.files && input.files[0];
         if (!f) { reject(new Error('no file picked')); return; }
-        f.text().then(function (t) { resolve(JSON.parse(t)); }, reject);
+        f.text().then(JSON.parse).then(resolve, reject);
       }, { once: true });
     });
   }

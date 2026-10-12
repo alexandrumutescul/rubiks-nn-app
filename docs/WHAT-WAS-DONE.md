@@ -127,3 +127,5 @@ depended on a score gap smaller than 1e-4. GitHub Pages publishes the page toget
 
 The next step is a cost-to-go network that estimates how many moves a state is from solved, paired with A* search,
 to shorten the solutions. It is in training.
+
+One documented limit of the in-browser parity: the page normalises the logits in float64 and rounds to float32, while PyTorch normalises in float32 with its own reduction order. On every real scramble tested the two agree exactly; only an artificial exact tie between two candidate paths, within one float32 rounding step, could make the page pick a different, equally valid solution.
