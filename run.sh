@@ -4,13 +4,53 @@
 set -euo pipefail
 
 NAME=rubiks-nn-app
+LABEL=app=rubiks-nn-app   # on every launch; the app's container is found by its name or by this label
 LOCAL_IMAGE=rubiks-nn-app
 PUBLISHED_IMAGE=ghcr.io/alexandrumutescul/rubiks-nn-app:latest
 PORT_SPAN=35          # ports tried: FIRST .. FIRST + 35 (8765 .. 8800 by default)
 HEALTH_TIMEOUT=60     # seconds to wait for GET /solver
+SOLVE_TIMEOUT=30      # seconds each test solve may take
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# "R U F' L2 D B'" applied to the solved cube: the post-start check asks the server to solve it
-TEST_STATE='[0,2,2,3,0,0,3,1,1,5,5,3,3,1,0,4,2,0,5,3,3,5,2,2,2,2,2,0,0,0,3,3,4,2,1,5,5,4,4,5,4,4,4,5,1,1,1,1,4,5,1,4,0,3]'
+# The start-up test cubes, as states (54 colours). The first is one turn from solved, so it must come back solved at
+# any --max-depth; the second, six moves from solved, is checked as well when --max-depth is 6 or more.
+TEST_MOVES="R"
+TEST_STATE='[0,0,2,0,0,2,0,0,2,1,1,1,1,1,1,1,1,1,2,2,3,2,2,3,2,2,3,3,3,5,3,3,5,3,3,5,4,4,4,4,4,4,4,4,4,0,5,5,0,5,5,0,5,5]'
+TEST2_MOVES="R U F' L2 D B'"
+TEST2_STATE='[0,2,2,3,0,0,3,1,1,5,5,3,3,1,0,4,2,0,5,3,3,5,2,2,2,2,2,0,0,0,3,3,4,2,1,5,5,4,4,5,4,4,4,5,1,1,1,1,4,5,1,4,0,3]'
+
+# One POST /solve, run by the container's own Python (always in the image, unlike curl or wget on the host):
+#   docker exec -i <container> python - '<state>' <seconds>    with this program on stdin.
+# It prints one line and exits 0 when the answer has "verified": true (the server's own check that the moves solve
+# the cube), 2 for an HTTP error, 3 for no answer within the time limit, 4 for an answer that is not verified. Any
+# other status (1: Python failed; 125 to 127: docker exec failed) means the check itself could not run.
+IFS= read -r -d '' SOLVE_CHECK <<'PY' || true
+import json, sys, urllib.error, urllib.request
+
+request = urllib.request.Request(
+    'http://127.0.0.1:8765/solve', data=json.dumps({'state': json.loads(sys.argv[1])}).encode(),
+    headers={'Content-Type': 'application/json'})
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never a proxy for 127.0.0.1
+try:
+    with opener.open(request, timeout=float(sys.argv[2])) as response:
+        text = response.read().decode('utf-8', 'replace')
+except urllib.error.HTTPError as exc:
+    print('HTTP %d %s' % (exc.code, exc.read().decode('utf-8', 'replace').strip()[:300]))
+    sys.exit(2)
+except OSError as exc:  # a time-out, or nothing listening
+    print('no answer: %s' % exc)
+    sys.exit(3)
+try:
+    answer = json.loads(text)
+except ValueError:
+    answer = None
+if isinstance(answer, dict) and answer.get('verified') is True:
+    moves, ms = answer.get('moves') or [], answer.get('ms')
+    print('%s (%d move%s, %s ms)' % (answer.get('notation') or 'no moves', len(moves), '' if len(moves) == 1 else 's',
+                                     '%.0f' % ms if isinstance(ms, (int, float)) else '?'))
+    sys.exit(0)
+print('not verified: %s' % text.strip()[:300])
+sys.exit(4)
+PY
 
 usage() {
   cat <<USAGE
@@ -28,6 +68,10 @@ Options:
 
 Without --image the image is built from this directory (docker build -t $LOCAL_IMAGE .); the first build downloads
 the Python base image and the CPU build of PyTorch, later builds are cached.
+
+Once the server answers, the container's own Python asks it to solve a cube one turn from solved (and, with
+--max-depth 6 or more, one six moves from solved). The start counts as a success only if that answer comes back
+verified; otherwise the script exits with an error and leaves the container running for docker logs $NAME.
 USAGE
 }
 
@@ -68,10 +112,28 @@ command -v docker >/dev/null 2>&1 || die "docker not found: install Docker Deskt
 docker info >/dev/null 2>&1 ||
   die "cannot talk to Docker: is Docker Desktop (or the docker service) running? On Linux, is this user in the docker group?"
 
-container_state() { docker inspect -f '{{.State.Status}}' "$NAME" 2>/dev/null || true; }
+# The app's containers: the one named $NAME and any labelled $LABEL (Docker Compose, or a docker run typed by hand),
+# each once, as "<id> <state> <name>" lines.
+app_containers() {
+  local ids id seen=" " info state cname
+  ids="$(docker container inspect -f '{{.Id}}' "$NAME" 2>/dev/null || true)"
+  ids="$ids $(docker ps -a -q --no-trunc --filter "label=$LABEL" 2>/dev/null || true)"
+  for id in $ids; do
+    case "$seen" in *" $id "*) continue ;; esac
+    seen="$seen$id "
+    info="$(docker container inspect -f '{{.State.Status}} {{.Name}}' "$id" 2>/dev/null || true)"
+    if [ -n "$info" ]; then
+      state="${info%% *}"
+      cname="${info#* }"
+      echo "$id $state ${cname#/}"
+    fi
+  done
+}
 
-# the host port the running container publishes 8765 on ("0.0.0.0:8766" -> 8766)
-host_port() { docker port "$NAME" 8765/tcp 2>/dev/null | sed -n '1s/.*://p' || true; }
+state_of() { docker container inspect -f '{{.State.Status}}' "$1" 2>/dev/null || true; }
+
+# the host port a container publishes 8765 on ("0.0.0.0:8766" -> 8766)
+host_port() { docker port "$1" 8765/tcp 2>/dev/null | sed -n '1s/.*://p' || true; }
 
 open_url() {
   if [ "$(uname -s)" = Darwin ] && command -v open >/dev/null 2>&1; then
@@ -86,29 +148,50 @@ open_url() {
 }
 
 if [ "$COMMAND" = stop ]; then
-  state="$(container_state)"
-  if [ -z "$state" ]; then
+  found="$(app_containers)"
+  if [ -z "$found" ]; then
     echo "$NAME is not running"
   else
-    docker stop "$NAME" >/dev/null 2>&1 || true
-    docker rm -f "$NAME" >/dev/null 2>&1 || true   # normally already gone (--rm)
-    echo "stopped $NAME"
+    while read -r id state cname; do
+      docker stop "$id" </dev/null >/dev/null 2>&1 || true
+      docker rm -f "$id" </dev/null >/dev/null 2>&1 || true   # normally already gone (--rm)
+      echo "stopped $cname"
+    done <<EOF
+$found
+EOF
   fi
   exit 0
 fi
 
 # -- already running? --------------------------------------------------------------------------------------------
-state="$(container_state)"
-if [ "$state" = running ]; then
-  port="$(host_port)"
-  [ -n "$port" ] || die "a container named $NAME is running but publishes no port; stop it with ./run.sh stop"
-  echo "$NAME is already running: open http://localhost:$port/"
+found="$(app_containers)"
+running="$(printf '%s\n' "$found" | awk '$2 == "running" && !n { print; n = 1 }')"
+if [ -n "$running" ]; then
+  read -r id state cname <<<"$running"
+  port="$(host_port "$id")"
+  [ -n "$port" ] || die "$cname (a container of this app) is running but publishes no port; stop it with ./run.sh stop"
+  echo "$cname is already running: open http://localhost:$port/"
   echo "(stop it with ./run.sh stop)"
   [ "$OPEN" = 1 ] && open_url "http://localhost:$port/"
   exit 0
-elif [ -n "$state" ]; then
-  echo "removing a stopped container named $NAME (state: $state)"
-  docker rm -f "$NAME" >/dev/null
+fi
+# None is running. Containers that have exited are cleared away, by id. Any other state (created, restarting, paused)
+# can be another start in progress, so that container is left alone and reported.
+if [ -n "$found" ]; then
+  while read -r id state cname; do
+    case "$state" in
+      exited | dead)
+        echo "removing a stopped container of this app: $cname (state: $state)"
+        docker rm -f "$id" </dev/null >/dev/null 2>&1 || true
+        ;;
+      *)
+        die "$cname (a container of this app) is $state; another ./run.sh may be starting it right now. Run" \
+            "./run.sh again in a moment, or remove it with ./run.sh stop"
+        ;;
+    esac
+  done <<EOF
+$found
+EOF
 fi
 
 # -- the image -----------------------------------------------------------------------------------------------------
@@ -141,14 +224,30 @@ port_busy() {
   return 1
 }
 
-# 0 = started; 1 = the port turned out to be taken (try the next one); 2 = any other failure (message printed)
+# The container is created, then started, so its id is known before anything can fail. After a failed start only that
+# id is removed, never a container found by name: another start may own the name meanwhile.
+# 0 = started (STARTED_ID is its id); 1 = the port turned out to be taken (try the next one); 2 = any other failure
+# (message printed); 3 = a container named $NAME appeared since the check above (another start).
+STARTED_ID=""
 try_run() {
-  local p="$1" out
-  if out="$(docker run --rm -d --name "$NAME" -p "$p:8765" -e BEAM="$BEAM" -e MAX_DEPTH="$MAX_DEPTH" "$IMAGE" 2>&1)"
-  then
+  local p="$1" out id
+  if ! out="$(docker create --rm --name "$NAME" --label "$LABEL" -p "$p:8765" \
+                -e BEAM="$BEAM" -e MAX_DEPTH="$MAX_DEPTH" "$IMAGE" 2>&1)"; then
+    if printf '%s\n' "$out" | grep -i 'already in use by' >/dev/null; then return 3; fi
+    printf '%s\n' "$out" >&2
+    return 2
+  fi
+  id="$(printf '%s\n' "$out" | sed -n '/^[0-9a-f]\{64\}$/p' | tail -n 1)"
+  if [ -z "$id" ]; then
+    printf '%s\n' "$out" >&2
+    echo "docker create printed no container id" >&2
+    return 2
+  fi
+  if out="$(docker start "$id" 2>&1)"; then
+    STARTED_ID="$id"
     return 0
   fi
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker rm -f "$id" >/dev/null 2>&1 || true   # this call's own container (a failed start can leave it behind)
   if printf '%s\n' "$out" |
      grep -Ei 'port is already allocated|address already in use|ports are not available|bind for|forbidden by its access permissions' \
        >/dev/null
@@ -168,8 +267,18 @@ while [ "$p" -le "$LAST_PORT" ]; do
   else
     rc=0
     try_run "$p" || rc=$?
-    if [ "$rc" = 0 ]; then port="$p"; break; fi
-    [ "$rc" = 1 ] || die "docker run failed (see above)"
+    case "$rc" in
+      0) port="$p"; break ;;
+      1) ;;
+      3)
+        other_state="$(state_of "$NAME")"
+        other_port="$(host_port "$NAME")"
+        die "a container named $NAME appeared while this one was being created" \
+            "(state: ${other_state:-unknown}${other_port:+, port $other_port}), probably from another start; it is" \
+            "left as it is. Run ./run.sh again to check it, or ./run.sh stop to remove it"
+        ;;
+      *) die "starting the container failed (see above)" ;;
+    esac
   fi
   p=$((p + 1))
 done
@@ -190,41 +299,51 @@ is_up() {
   local body rc=0
   body="$(http_get "http://127.0.0.1:$port/solver")" || rc=$?
   if [ "$rc" = 2 ]; then  # no HTTP client here: rely on the image's own health check
-    [ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$NAME" 2>/dev/null)" = healthy ]
+    [ "$(docker container inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$STARTED_ID" \
+           2>/dev/null)" = healthy ]
     return
   fi
   [ "$rc" = 0 ] && printf '%s' "$body" | grep '"backend": "policy"' >/dev/null
 }
 
+LEFT_RUNNING="the container is left running so you can look: docker logs $NAME; stop it with ./run.sh stop"
+
 echo "started $NAME on port $port (beam $BEAM, max depth $MAX_DEPTH); waiting for the server ..."
 deadline=$((SECONDS + HEALTH_TIMEOUT))
 until is_up; do
-  if [ "$(container_state)" != running ]; then
+  if [ "$(state_of "$STARTED_ID")" != running ]; then
     die "the container stopped during start-up; to see why, run it in the foreground:
-  docker run --rm -p $port:8765 -e BEAM=$BEAM -e MAX_DEPTH=$MAX_DEPTH $IMAGE"
+  docker run --rm --name $NAME --label $LABEL -p $port:8765 -e BEAM=$BEAM -e MAX_DEPTH=$MAX_DEPTH $IMAGE"
   fi
   if [ "$SECONDS" -ge "$deadline" ]; then
-    die "no answer on http://localhost:$port/solver after ${HEALTH_TIMEOUT} s; see: docker logs $NAME"
+    die "no answer on http://localhost:$port/solver after ${HEALTH_TIMEOUT} s; $LEFT_RUNNING"
   fi
   sleep 1
 done
 
-# -- one real solve, so "up" means the network answers, not only the web server --------------------------------------
-if command -v curl >/dev/null 2>&1; then
+# -- real solves, so "up" means the network answers, not only the web server ---------------------------------------
+# check_solve STATE: one POST /solve from inside the container; prints the one-line result, returns its status (above)
+check_solve() { docker exec -i "$STARTED_ID" python - "$1" "$SOLVE_TIMEOUT" <<<"$SOLVE_CHECK" 2>&1; }
+
+rc=0
+answer="$(check_solve "$TEST_STATE")" || rc=$?
+case "$rc" in
+  0) echo "test solve OK: the network solved $TEST_MOVES with $answer" ;;
+  3) die "the test solve ($TEST_MOVES) got no answer within ${SOLVE_TIMEOUT} s: $answer; $LEFT_RUNNING" ;;
+  *) die "the test solve ($TEST_MOVES) failed: $answer; $LEFT_RUNNING" ;;
+esac
+if [ "$MAX_DEPTH" -ge 6 ]; then
   rc=0
-  answer="$(curl -fsS --max-time 30 -H 'Content-Type: application/json' -d "{\"state\": $TEST_STATE}" \
-            "http://127.0.0.1:$port/solve" 2>&1)" || rc=$?
-  if [ "$rc" = 28 ]; then
-    echo "warning: the test solve took more than 30 s at beam $BEAM; the page gives up after 20 s, so restart" \
-         "with a smaller --beam (./run.sh stop; ./run.sh --beam 1024)" >&2
-  elif [ "$rc" != 0 ]; then
-    die "the test solve failed: $answer (see: docker logs $NAME)"
-  elif printf '%s' "$answer" | grep '"verified": true' >/dev/null; then
-    notation="$(printf '%s' "$answer" | sed -n 's/.*"notation": "\([^"]*\)".*/\1/p')"
-    echo "test solve OK: the network solved R U F' L2 D B' with $notation"
-  else
-    die "the test solve did not verify: $answer"
-  fi
+  answer="$(check_solve "$TEST2_STATE")" || rc=$?
+  case "$rc" in
+    0) echo "test solve OK: the network solved $TEST2_MOVES with $answer" ;;
+    2) echo "warning: the second test cube ($TEST2_MOVES) was not solved: $answer. At beam $BEAM and max depth" \
+            "$MAX_DEPTH some cubes are not solved; a larger --beam solves more" >&2 ;;
+    3) echo "warning: the second test solve ($TEST2_MOVES) took more than ${SOLVE_TIMEOUT} s at beam $BEAM" \
+            "($answer); the page gives up after 20 s, so restart with a smaller --beam (./run.sh stop;" \
+            "./run.sh --beam 1024)" >&2 ;;
+    *) die "the second test solve ($TEST2_MOVES) failed: $answer; $LEFT_RUNNING" ;;
+  esac
 fi
 
 echo

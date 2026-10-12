@@ -1,10 +1,14 @@
 # docker compose up            -> builds the image on first use, serves http://localhost:8765/
 # PORT=9000 docker compose up  -> another host port (compose does not look for a free port; ./run.sh does)
+# The container name and the label app=rubiks-nn-app let ./run.sh and run.ps1 find this copy instead of starting
+# a second one.
 services:
   rubiks-nn-app:
     build: .
     image: rubiks-nn-app
     container_name: rubiks-nn-app
+    labels:
+      app: rubiks-nn-app
     ports:
       - "${PORT:-8765}:8765"
     environment:

@@ -1,7 +1,13 @@
 # Rubik's cube web app served by the trained policy network (CPU only).
 #   docker build -t rubiks-nn-app .
-#   docker run --rm -p 8765:8765 rubiks-nn-app        then open http://localhost:8765/
-FROM python:3.12-slim
+#   docker run --rm --name rubiks-nn-app --label app=rubiks-nn-app -p 8765:8765 rubiks-nn-app
+# then open http://localhost:8765/
+
+# The base image is pinned by digest, so every build starts from the same files. The digest is that of the
+# multi-architecture index (amd64 and arm64) of python:3.12-slim, as printed by
+# `docker buildx imagetools inspect python:3.12-slim`:
+#   python:3.12-slim  sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -11,14 +17,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Dependencies first, so code changes do not re-download them. torch comes from the PyTorch CPU index: the default
 # Linux x86-64 wheel on PyPI pulls the CUDA libraries (gigabytes) that this image never uses. On arm64 the wheels are
-# CPU-only anyway, so the same line works on both architectures.
-RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.4" \
+# CPU-only anyway, so the same line works on both architectures. torch is pinned to 2.14.1, the version the network
+# was trained with (a local version such as 2.14.1+cpu matches ==2.14.1).
+RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.14.1" \
  && pip install "numpy>=2"
 
 WORKDIR /app
 COPY pyproject.toml ./
 COPY rubiks ./rubiks
 COPY web ./web
+# The page's in-browser solver finds the model at model/policy-v2.onnx next to index.html (web/model/README.md).
+COPY models/policy-v2.onnx ./web/model/policy-v2.onnx
 COPY models ./models
 
 # An unprivileged user; the files stay owned by root and are made world-readable whatever the checkout's umask was.

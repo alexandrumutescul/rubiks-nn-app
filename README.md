@@ -5,6 +5,17 @@ press **Solve**, and a trained policy network guides a beam search to a move seq
 page then animates it. The network was trained only on random scrambles of the solved cube, with no hand-written
 solving knowledge: for each scrambled state it predicts the move that undoes the last scramble move.
 
+Live demo:
+
+- <https://cube.dovada.org>: the Docker image behind a reverse proxy. Pick **Remote solver (POST /solve)** to
+  solve on that server.
+- <https://alexandrumutescul.github.io/rubiks-nn-app/>: a static copy on GitHub Pages that solves in the browser.
+  Pick **Neural network (ONNX, in the browser)**.
+
+![Solving a random cube with the network](docs/demo.gif)
+
+*A uniformly random state, solved with the Remote solver: the server's verified 31-move solution, animated on the page.*
+
 This repository contains the serving code, the web page and the trained weights. Everything runs on a CPU inside
 one Docker container. At the default beam width of 1024 the network solved 100% of 1,000 uniformly random cubes,
 with 26.4 moves on average, in about 130 ms per cube on an Apple M4 Max CPU. The solutions are not optimal (an
@@ -18,11 +29,13 @@ You need Docker: Docker Desktop on macOS and Windows, Docker Engine on Linux.
 ### 1. One command (published image)
 
 ```
-docker run --rm -p 8765:8765 ghcr.io/alexandrumutescul/rubiks-nn-app:latest
+docker run --rm --name rubiks-nn-app --label app=rubiks-nn-app -p 8765:8765 ghcr.io/alexandrumutescul/rubiks-nn-app:latest
 ```
 
 Open <http://localhost:8765/> and press Ctrl-C to stop. If port 8765 is taken, change the number on the left, e.g.
-`-p 8766:8765`, and open <http://localhost:8766/> instead.
+`-p 8766:8765`, and open <http://localhost:8766/> instead. The name and the label let `run.sh` and `run.ps1` see
+that this copy is running, so they print its address instead of starting a second one. If Docker says that the name
+is already in use, the app is already running; `docker stop rubiks-nn-app` stops it.
 
 ### 2. `./run.sh` (picks a free port for you)
 
@@ -39,12 +52,19 @@ cd rubiks-nn-app
 1. builds the image from this directory (`docker build -t rubiks-nn-app .`; cached after the first time), or pulls
    the published one with `--image ghcr.io/alexandrumutescul/rubiks-nn-app:latest`;
 2. checks ports 8765 to 8800 and takes the first free one;
-3. starts the container (`docker run --rm -d --name rubiks-nn-app -p <port>:8765 ...`). If Docker still reports the
-   port as taken, it moves on to the next port;
-4. waits up to 60 s for `GET /solver` to answer and sends one test cube to `POST /solve`;
+3. creates and starts the container (`docker create --rm --name rubiks-nn-app --label app=rubiks-nn-app
+   -p <port>:8765 ...`, then `docker start`). If Docker still reports the port as taken, it removes the container it
+   has just created and moves on to the next port;
+4. waits up to 60 s for `GET /solver` to answer. Then the container's own Python sends a test cube one turn from
+   solved (`R`) to `POST /solve`, and, when `--max-depth` is 6 or more, a second one six moves from solved. The
+   start counts as a success only if the first answer comes back `"verified": true`. Otherwise `run.sh` exits with
+   an error and leaves the container running, so that `docker logs rubiks-nn-app` shows what happened. If a small
+   `--beam` leaves the second cube unsolved, `run.sh` only warns;
 5. prints `open http://localhost:<port>/`.
 
-If the app is already running, `run.sh` prints its address and does not start a second copy.
+If the app is already running, `run.sh` prints its address and does not start a second copy. It finds the app's
+container by the name `rubiks-nn-app` or the label `app=rubiks-nn-app`, so a copy started with the `docker run`
+command above or with Docker Compose counts too.
 
 | option | default | meaning |
 |---|---|---|
@@ -72,7 +92,8 @@ PORT=9000 docker compose up -d # another host port, in the background
 docker compose down
 ```
 
-Compose does not look for a free port. Set `PORT` yourself, or use `run.sh`.
+Compose does not look for a free port. Set `PORT` yourself, or use `run.sh`. Compose gives the container the same
+name and label, so `run.sh` and `run.ps1` find it and print its address instead of starting a second copy.
 
 ## Without Docker
 
@@ -130,8 +151,9 @@ before the beam is cut, one network call per depth over the whole beam, and at m
   takes longer. A progress line shows each depth, and **Stop** cancels between depths.
 - The status line reads `last solve: onnx: policy-v2 (beam 1024), <n> moves, <t> ms, <nodes> nodes, verified`. As
   with the server, the page checks the moves with its own tables before it animates them.
-- The page must come from a web server, because under `file://` the browser cannot load the model. With
-  `python -m rubiks.serve --web web`, copy the model next to the page first:
+- The page must come from a web server, because under `file://` the browser cannot load the model. The Docker image
+  has the model next to the page (`web/model/policy-v2.onnx`), so this backend also works at the app's own address,
+  `http://localhost:<port>/`. With `python -m rubiks.serve --web web`, copy the model next to the page first:
   `mkdir -p web/model && cp models/policy-v2.onnx web/model/`. [web/model/README.md](web/model/README.md) gives the
   order in which the page looks for the model.
 - ONNX Runtime runs single-threaded here, because GitHub Pages does not send the headers that WebAssembly threads
@@ -139,8 +161,17 @@ before the beam is cut, one network call per depth over the whole beam, and at m
 - **Parity check.** `tests/test_web_search_parity.py` writes `tests/data/web-parity.json`, 31 cases solved by the
   Python search (20 scrambles with the ONNX model and 11 with an exact synthetic policy that forces score ties), and
   checks that the Python search still gives the same answers. `web/search-test.html` runs the same cases through
-  `web/search.js` in a browser and ends with `PARITY 31/31 PASS` when every case matches. To run it, start
-  `python -m rubiks.serve --web .` from the repository root and open <http://localhost:8765/web/search-test.html>.
+  `web/search.js` in a browser. To run it locally, start a server from the repository root and open the harness
+  (it needs internet access for ONNX Runtime Web):
+
+  ```
+  python -m rubiks.serve --port 8777 --host 127.0.0.1 --web . --backend none
+  # then open http://127.0.0.1:8777/web/search-test.html in a browser
+  ```
+
+  When every case matches, the page title becomes `PARITY 31/31 PASS`. It passed 31/31 in Chrome with ONNX Runtime
+  Web 1.20.1: the model loaded in 625 ms, and the network's 18 logits for each case's start state were within 3.3e-6
+  of those from `onnxruntime` in Python.
 
 ### API
 
@@ -191,12 +222,13 @@ The server rejects bad requests:
 How to set them:
 
 ```
-docker run --rm -p 8765:8765 -e BEAM=256 ghcr.io/alexandrumutescul/rubiks-nn-app:latest
+docker run --rm --name rubiks-nn-app --label app=rubiks-nn-app -p 8765:8765 -e BEAM=256 ghcr.io/alexandrumutescul/rubiks-nn-app:latest
 ./run.sh --beam 256
 BEAM=4096 docker compose up
 ```
 
-Measured CPU times per random cube (Apple M4 Max): about **130 ms at beam 1024** and **73 ms at beam 256**. Beam
+Measured CPU times per random cube (Apple M4 Max): about **130 ms at beam 1024** and **73 ms at beam 256**. Inside
+the Docker container on the same machine, a random cube took about 190 ms at beam 1024. Beam
 4096 finds the shortest solutions and takes about 100 ms on an Apple GPU, but it is slower on a CPU. Beam 256
 leaves about 13% of random cubes unsolved; the server answers those with an error. The page waits at most 20 s for
 an answer.
@@ -243,11 +275,18 @@ rubiks/              the Python package
   solver_nn.py       NNSolver: loads a checkpoint, runs the search, re-checks the answer
   serve.py           HTTP server: the page, GET /solver, POST /solve
   export_web.py      regenerates web/cube-tables.js from the Python model
-web/                 the page: index.html, app.js, solver.js, cube-tables.js (see web/README.md)
+web/                 the page (see web/README.md)
+  index.html         the page and its CSS
+  app.js             the 3D view, the 2D net, the move queue, the controls and the solver wiring
+  solver.js          cube logic from the tables; the solver backends (remote, in-browser ONNX)
+  search.js          the beam search of search.py in JavaScript, for the in-browser solver
+  search-test.html   parity harness: search.js against the Python search (tests/data/web-parity.json)
+  cube-tables.js     generated by export_web.py
+  model/             where the in-browser solver also looks for policy-v2.onnx (see web/model/README.md)
 models/              the trained weights (see models/README.md)
-tests/               pytest suite
-docs/WHAT-WAS-DONE.md
-Dockerfile, .dockerignore, compose.yaml, run.sh, run.ps1, .github/workflows/ci.yml
+tests/               pytest suite; tests/data/web-parity.json is the parity fixture
+docs/                WHAT-WAS-DONE.md, demo.gif
+Dockerfile, .dockerignore, compose.yaml, run.sh, run.ps1, .github/workflows/ (ci.yml, pages.yml)
 LICENSE, CITATION.cff
 ```
 
@@ -258,8 +297,11 @@ LICENSE, CITATION.cff
 - **Small beams can fail.** At beam 256 about 13% of random cubes are not solved within the move limit. The server
   then answers 500 with the reason, because the image has no fallback solver.
 - **CPU only.** The image does not use a GPU, so larger beams are noticeably slower in it.
-- **The in-browser solver is a stub.** The page's *Neural network (ONNX, in the browser)* backend is not
-  implemented yet. The ONNX export (`models/policy-v2.onnx`) is included for it.
+- **The in-browser solver needs the model next to the page, and internet access the first time.** The page's
+  *Neural network (ONNX, in the browser)* backend works from the Docker image, from the GitHub Pages site, or from
+  any server that has `policy-v2.onnx` where the page looks for it ([web/model/README.md](web/model/README.md)). It
+  does not work from a `file://` page. It loads ONNX Runtime Web 1.20.1 from cdnjs on first use; after that the
+  browser normally has it in its cache.
 - **Development-grade server.** It is meant for a laptop or a local network, not the open internet. Docker
   publishes the port on every network interface; use `-p 127.0.0.1:8765:8765` to keep the app private to your
   computer.

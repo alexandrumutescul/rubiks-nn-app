@@ -9,7 +9,10 @@ px wide) and on a desktop. It is plain HTML and JavaScript with no build step. T
 | `index.html` | the page and its CSS (light and dark themes) |
 | `app.js` | the 3D view (three.js r128 from cdnjs), the 2D net, the move queue, the controls and the solver wiring |
 | `solver.js` | cube logic driven only by the tables, and the solver interface with its backends |
+| `search.js` | the beam search of `rubiks/search.py` in JavaScript, used by the in-browser solver |
+| `search-test.html` | the parity harness: runs `tests/data/web-parity.json` through `search.js` (see the main README) |
 | `cube-tables.js` | **generated** by `python -m rubiks.export_web`; never edit it by hand |
+| `model/` | where the in-browser solver also looks for `policy-v2.onnx` ([model/README.md](model/README.md)) |
 
 ## How to open it
 
@@ -18,8 +21,9 @@ px wide) and on a desktop. It is plain HTML and JavaScript with no build step. T
 - **As a file.** Open `web/index.html` directly. The Remote solver then calls `http://localhost:8765/solve`, which
   works while the app runs on that port, because the server sends CORS headers.
 
-The only external script is three.js from cdnjs. Offline, the page replaces the 3D view with a note, and the 2D net
-and every control keep working.
+The external scripts come from cdnjs: three.js for the 3D view and, once the in-browser solver is first used, ONNX
+Runtime Web. Offline, the page replaces the 3D view with a note, the 2D net and the other controls keep working, and
+the in-browser solver says that it could not load ONNX Runtime Web.
 
 ## `cube-tables.js`
 
@@ -51,8 +55,9 @@ the returned moves itself before it animates them.
 
 1. **Reverse history** undoes the moves made on the page.
 2. **Remote solver** sends `POST {"state": [54 ints]}` to `/solve` and gives up after 20 s.
-3. **Neural network (ONNX, in the browser)** is a stub that is not implemented yet. It is meant to run
-   `models/policy-v2.onnx` in the browser with ONNX Runtime Web.
+3. **Neural network (ONNX, in the browser)** runs `policy-v2.onnx` in the browser with ONNX Runtime Web 1.20.1 and
+   the beam search in `search.js`, without calling `/solve`; [model/README.md](model/README.md) says where it finds
+   the model.
 
 To add another backend, push a `Solver` subclass onto the list in `createSolvers`. The browser console exposes
 `window.rubiksApp` (`state`, `logic`, `solvers`, the load-time `report`, `enqueueMoves([...])`).

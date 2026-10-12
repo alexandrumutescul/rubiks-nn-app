@@ -5,6 +5,6 @@ title: "rubiks-nn-app: a neural network Rubik's cube solver web app"
 authors:
   - family-names: Mutescul
     given-names: Alexandru
-year: 2026
+date-released: "2026-10-12"
 repository-code: "https://github.com/alexandrumutescul/rubiks-nn-app"
 license: MIT

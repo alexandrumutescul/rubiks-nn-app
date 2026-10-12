@@ -3,7 +3,7 @@
 | file | what it is |
 |---|---|
 | `policy-v2.pt` | the trained policy network (PyTorch checkpoint, 3.5 MB); this is what the server loads |
-| `policy-v2.onnx` | the same network exported to ONNX (opset 17), for an in-browser solver; the page does not use it yet |
+| `policy-v2.onnx` | the same network exported to ONNX (opset 17); the page's in-browser solver loads it |
 | `policy-v2.onnx.json` | the ONNX file's contract: input and output names, shapes, encoding, move order, and an export check |
 | `policy-v2.train-config.json` | the training settings and results: data, optimiser, schedule, best epoch, validation accuracy |
 | `SHA256SUMS` | SHA-256 checksums of the two model files |
