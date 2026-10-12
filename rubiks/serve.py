@@ -474,7 +474,7 @@ def resolve_backend_name(args: argparse.Namespace) -> str:
 
 def build_backend(args: argparse.Namespace) -> Backend:
     """Build the backend chosen on the command line, once (a network checkpoint is loaded here, never per request).
-    Raises BackendStartupError with a message for the operator."""
+    Raises BackendStartupError with a message for whoever starts the server."""
     name = resolve_backend_name(args)
     if name == "none":
         return Backend("none")
