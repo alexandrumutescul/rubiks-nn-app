@@ -284,10 +284,25 @@
           <input id="remote-url" type="url" autocomplete="off" spellcheck="false" data-lock>
         </label>
       </div>
+      <div id="onnx-row" hidden>
+        <div class="row">
+          <label class="field narrow">Beam width
+            <input id="onnx-width" type="number" min="64" max="4096" step="1" value="1024" inputmode="numeric" data-lock>
+          </label>
+          <label class="field">Model URL (empty = automatic)
+            <input id="onnx-model" type="text" placeholder="automatic" autocomplete="off" spellcheck="false" data-lock>
+          </label>
+        </div>
+        <p class="hint">Runs the policy network in this browser (ONNX Runtime Web from cdnjs) with the server's beam
+          search: width 64 to 4096 (default 1024; wider gives shorter solutions and takes longer), at most 40 moves.
+          Automatic model lookup, relative to this page: ../models/policy-v2.onnx, models/policy-v2.onnx,
+          model/policy-v2.onnx.</p>
+      </div>
       <div class="row">
         <button id="solve" class="btn primary" type="button" data-lock>Solve</button>
         <button id="stop" class="btn" type="button">Stop</button>
       </div>
+      <div id="progress" class="hint" hidden></div>
       <div class="seq-label">Solution <span id="solution-meta"></span></div>
       <div class="seq" id="solution" aria-live="polite"></div>
       <button id="animate-anyway" class="btn warn" type="button" hidden>Animate anyway</button>
@@ -328,6 +343,7 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" referrerpolicy="no-referrer"></script>
 <script src="cube-tables.js"></script>
+<script src="search.js"></script>
 <script src="solver.js"></script>
 <script src="app.js"></script>
 </body>

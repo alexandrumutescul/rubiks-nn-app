@@ -117,6 +117,31 @@ Then open <http://localhost:8765/>.
 **Stop** cancels a running solve. The page also works on a phone: open `http://<this computer's IP>:<port>/`
 from a phone on the same network.
 
+### In-browser solver
+
+The page can also solve with no server at all: **try it on GitHub Pages at
+<https://alexandrumutescul.github.io/rubiks-nn-app/>**. Set **Backend** to **Neural network (ONNX, in the
+browser)**. The page then runs the same network, `models/policy-v2.onnx`, inside the browser with ONNX Runtime Web
+1.20.1, which it loads from cdnjs on first use. `web/search.js` is the beam search of `rubiks/search.py` written in
+JavaScript: the same move filter, scores, duplicate removal and tie-breaking, the same check for a solved state
+before the beam is cut, one network call per depth over the whole beam, and at most 40 moves.
+
+- **Beam width** is set under the backend, from 64 to 4096 (default 1024). A wider beam finds shorter solutions and
+  takes longer. A progress line shows each depth, and **Stop** cancels between depths.
+- The status line reads `last solve: onnx: policy-v2 (beam 1024), <n> moves, <t> ms, <nodes> nodes, verified`. As
+  with the server, the page checks the moves with its own tables before it animates them.
+- The page must come from a web server, because under `file://` the browser cannot load the model. With
+  `python -m rubiks.serve --web web`, copy the model next to the page first:
+  `mkdir -p web/model && cp models/policy-v2.onnx web/model/`. [web/model/README.md](web/model/README.md) gives the
+  order in which the page looks for the model.
+- ONNX Runtime runs single-threaded here, because GitHub Pages does not send the headers that WebAssembly threads
+  need.
+- **Parity check.** `tests/test_web_search_parity.py` writes `tests/data/web-parity.json`, 31 cases solved by the
+  Python search (20 scrambles with the ONNX model and 11 with an exact synthetic policy that forces score ties), and
+  checks that the Python search still gives the same answers. `web/search-test.html` runs the same cases through
+  `web/search.js` in a browser and ends with `PARITY 31/31 PASS` when every case matches. To run it, start
+  `python -m rubiks.serve --web .` from the repository root and open <http://localhost:8765/web/search-test.html>.
+
 ### API
 
 The server that serves the page also answers two endpoints.

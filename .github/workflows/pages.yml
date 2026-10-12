@@ -1,0 +1,45 @@
+name: pages
+
+# Publishes the web page with the in-browser solver to GitHub Pages: the site is web/ plus model/policy-v2.onnx
+# (copied from models/), so the page's model lookup finds model/policy-v2.onnx next to index.html.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the model files
+        run: cd models && sha256sum -c SHA256SUMS
+      - name: Build the site
+        run: |
+          mkdir -p _site/model
+          cp -R web/. _site/
+          cp models/policy-v2.onnx _site/model/policy-v2.onnx
+          ls -la _site _site/model
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

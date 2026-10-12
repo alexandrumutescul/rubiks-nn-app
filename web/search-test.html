@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>search.js parity: running</title>
+<style>
+  body { margin: 16px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  h1 { font: 600 18px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0 0 8px; }
+  p { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 70em; }
+  #summary { font-size: 18px; font-weight: 700; margin: 12px 0; }
+  #log div { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .pass { color: #1a7f37; }
+  .fail { color: #cf222e; font-weight: 700; }
+  .info { color: #59636e; }
+</style>
+</head>
+<body>
+<h1>Parity: web/search.js against rubiks/search.py</h1>
+<p>Runs every case of <code>tests/data/web-parity.json</code> (written by <code>tests/test_web_search_parity.py</code>
+  from <code>rubiks.search.beam_search</code>) through <code>web/search.js</code>: the <em>logic</em> cases with an
+  exact synthetic policy, the <em>onnx</em> cases with <code>models/policy-v2.onnx</code> in ONNX Runtime Web, loaded
+  exactly as the page loads it. Serve the repository root (<code>python -m rubiks.serve --web .</code>) and open
+  <code>/web/search-test.html</code>. URL parameters: <code>fixture=URL</code>, <code>model=URL</code>,
+  <code>ort=VERSION</code>.</p>
+<p><label>Fixture file (only needed when the page cannot fetch it):
+  <input type="file" id="fixture-file" accept=".json,application/json"></label></p>
+<div id="summary">running…</div>
+<div id="log"></div>
+
+<script src="cube-tables.js"></script>
+<script src="search.js"></script>
+<script src="solver.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const FORMAT = 'rubiks-nn web search parity';
+  const LOGIC_POLICY = 'misplaced-hash-v1';
+  const FIXTURE_URLS = ['../tests/data/web-parity.json', 'web-parity.json'];
+  const params = new URLSearchParams(window.location.search);
+  const logEl = document.getElementById('log');
+  const summaryEl = document.getElementById('summary');
+  const result = { done: false, summary: '', pass: 0, total: 0, cases: [] };
+  window.parityResult = result;  // for automation: wait for parityResult.done, then read parityResult.summary
+
+  function line(text, cls) {
+    const el = document.createElement('div');
+    el.className = cls || 'info';
+    el.textContent = text;
+    logEl.appendChild(el);
+    if (cls === 'fail') console.error(text); else console.log(text);
+  }
+
+  function finish(text) {
+    result.summary = text;
+    result.done = true;
+    summaryEl.textContent = text;
+    summaryEl.className = / PASS$/.test(text) ? 'pass' : 'fail';
+    document.title = text;
+    console.log(text);
+  }
+
+  function yieldNow() { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
+
+  function sci(x) { return (typeof x === 'number' && isFinite(x)) ? x.toExponential(1) : String(x); }
+
+  function sameMoves(a, b) {
+    if (a === null || b === null) return a === b;
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  function describe(moves, logic) {
+    return moves === null ? 'no solution' : moves.length + ' moves [' + logic.formatMoves(moves) + ']';
+  }
+
+  /** The fixture's synthetic policy (tests/test_web_search_parity.py logic_values): for move m,
+   *  child = state after m; value = -(4 * misplaced(child) + (sum_i child[i] * (i + 1)) mod 5) / 64. */
+  function logicPolicy(T) {
+    const perms = T.move_perms;
+    const solved = T.solved;
+    return async function (states) {
+      const out = new Float32Array(states.length * 18);
+      for (let r = 0; r < states.length; r++) {
+        const s = states[r];
+        for (let m = 0; m < 18; m++) {
+          const p = perms[m];
+          let misplaced = 0;
+          let h = 0;
+          for (let i = 0; i < 54; i++) {
+            const c = s[p[i]];
+            if (c !== solved[i]) misplaced++;
+            h += c * (i + 1);
+          }
+          out[r * 18 + m] = -(4 * misplaced + (h % 5)) / 64;
+        }
+      }
+      return out;
+    };
+  }
+
+  async function fetchJson(url) {
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp.json();
+  }
+
+  function pickFile() {
+    return new Promise(function (resolve, reject) {
+      const input = document.getElementById('fixture-file');
+      input.addEventListener('change', function () {
+        const f = input.files && input.files[0];
+        if (!f) { reject(new Error('no file picked')); return; }
+        f.text().then(function (t) { resolve(JSON.parse(t)); }, reject);
+      }, { once: true });
+    });
+  }
+
+  async function loadFixture() {
+    const urls = params.get('fixture') ? [params.get('fixture')] : FIXTURE_URLS;
+    const tried = [];
+    for (const url of urls) {
+      try {
+        const fx = await fetchJson(url);
+        line('fixture: ' + url);
+        return fx;
+      } catch (e) {
+        tried.push(url + ' (' + (e && e.message ? e.message : e) + ')');
+      }
+    }
+    line('fixture not found: tried ' + tried.join('; ') + '. Pick tests/data/web-parity.json with the file input ' +
+         'above, or serve the repository root and open /web/search-test.html.', 'fail');
+    summaryEl.textContent = 'waiting for the fixture file…';
+    const fx = await pickFile();
+    line('fixture: picked file');
+    return fx;
+  }
+
+  async function sha256Hex(bytes) {
+    if (!window.crypto || !window.crypto.subtle) return null;
+    const d = new Uint8Array(await window.crypto.subtle.digest('SHA-256', bytes));
+    return Array.from(d, function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+  }
+
+  async function runCase(c, policyFn, normalize, T, logic, extra) {
+    const state = Uint8Array.from(c.state);
+    const head = c.id + ' (scramble ' + c.scramble.length + ', width ' + c.width + ', max depth ' + c.max_depth +
+                 (c.no_backtrack === false ? ', no_backtrack off' : '') + ')';
+    const t0 = performance.now();
+    let res = null;
+    let error = null;
+    try {
+      res = await window.RubiksSearch.beamSearch(policyFn, state, {
+        tables: T, width: c.width, maxDepth: c.max_depth, noBacktrack: c.no_backtrack !== false,
+        normalize: normalize, yieldFn: yieldNow,
+      });
+    } catch (e) {
+      error = e;
+    }
+    const ms = performance.now() - t0;
+    let ok = false;
+    let detail;
+    if (error) {
+      detail = 'search threw: ' + (error && error.message ? error.message : error);
+    } else {
+      const solves = res.moves === null || logic.isSolved(logic.applySequence(state, res.moves));
+      ok = sameMoves(res.moves, c.moves) && res.nodes === c.nodes && res.depth === c.depth && solves;
+      detail = ok
+        ? describe(res.moves, logic) + ', ' + res.nodes + ' nodes, depth ' + res.depth
+        : 'expected ' + describe(c.moves, logic) + ', ' + c.nodes + ' nodes, depth ' + c.depth + '; got ' +
+          describe(res.moves, logic) + ', ' + res.nodes + ' nodes, depth ' + res.depth +
+          (solves ? '' : ' (DOES NOT SOLVE)');
+    }
+    detail += ', ' + Math.round(ms) + ' ms' + (extra ? '; ' + extra : '');
+    if (!ok && c.policy === 'onnx') detail += '; decision margin ' + sci(c.margin);
+    line((ok ? 'PASS ' : 'FAIL ') + head + ': ' + detail, ok ? 'pass' : 'fail');
+    result.cases.push({ id: c.id, ok: ok, detail: detail });
+    if (ok) result.pass++;
+    return ok;
+  }
+
+  async function main() {
+    if (window.location.protocol === 'file:') {
+      finish('PARITY 0/0 FAIL: opened as file://; serve the repository root (python -m rubiks.serve --web .) ' +
+             'and open /web/search-test.html');
+      return;
+    }
+    const T = window.CUBE_TABLES;
+    const RS = window.RubiksSolver;
+    if (!T || !RS || !window.RubiksSearch) {
+      finish('PARITY 0/0 FAIL: cube-tables.js, search.js or solver.js did not load');
+      return;
+    }
+    const logic = RS.createCubeLogic(T);
+    const report = logic.verifyTables();
+    line(report.summary, report.ok ? 'info' : 'fail');
+    const fx = await loadFixture();
+    if (!fx || fx.format !== FORMAT || !Array.isArray(fx.cases)) {
+      finish('PARITY 0/0 FAIL: not a "' + FORMAT + '" fixture');
+      return;
+    }
+    const cases = fx.cases;
+    result.total = cases.length;
+    const logicCases = cases.filter(function (c) { return c.policy === 'logic'; });
+    const onnxCases = cases.filter(function (c) { return c.policy === 'onnx'; });
+    line(cases.length + ' cases: ' + logicCases.length + ' logic, ' + onnxCases.length + ' onnx; fixture from ' +
+         'onnxruntime ' + fx.onnxruntime + ', model sha256 ' + fx.model_sha256);
+
+    // 1. logic cases: pure JavaScript, exact arithmetic, many exact ties
+    let logicPass = 0;
+    const logicName = fx.logic_policy && fx.logic_policy.name;
+    for (const c of logicCases) {
+      if (logicName !== LOGIC_POLICY) {
+        line('FAIL ' + c.id + ': the fixture uses logic policy "' + logicName + '", this page implements "' +
+             LOGIC_POLICY + '"', 'fail');
+        result.cases.push({ id: c.id, ok: false, detail: 'unknown logic policy' });
+        continue;
+      }
+      if (await runCase(c, logicPolicy(T), false, T, logic, '')) logicPass++;
+    }
+
+    // 2. onnx cases: ONNX Runtime Web + the model, loaded by the page's own OnnxSolver
+    let onnxPass = 0;
+    const solver = new RS.OnnxSolver(logic, { ortVersion: params.get('ort') || undefined,
+                                              modelUrl: params.get('model') || undefined });
+    let policyFn = null;
+    let loadError = null;
+    try {
+      policyFn = await solver.createPolicyFn(function (text) { line(text); });
+      const rec = solver.loaded;
+      line('model ' + rec.url + ' loaded in ' + Math.round(rec.loadMs) + ' ms; ONNX Runtime Web ' + rec.ortVersion +
+           ', ' + rec.threads + ' thread(s), crossOriginIsolated ' + !!window.crossOriginIsolated + ', ' +
+           navigator.userAgent);
+      try {
+        const bytes = new Uint8Array(await (await fetch(rec.url)).arrayBuffer());
+        const hex = await sha256Hex(bytes);
+        if (hex === null) line('model sha256: not checked (no crypto.subtle in this context)');
+        else if (hex !== fx.model_sha256) loadError = new Error('the model is not the fixture\'s (sha256 ' + hex + ')');
+        else line('model sha256 matches the fixture');
+      } catch (e) {
+        line('model sha256: not checked (' + (e && e.message ? e.message : e) + ')');
+      }
+    } catch (e) {
+      loadError = e;
+    }
+    if (loadError) line('ONNX: ' + (loadError.message || loadError), 'fail');
+    for (const c of onnxCases) {
+      if (!policyFn || loadError) {
+        line('FAIL ' + c.id + ': ' + (loadError ? loadError.message || loadError : 'no policy'), 'fail');
+        result.cases.push({ id: c.id, ok: false, detail: 'ONNX not available' });
+        continue;
+      }
+      const root = await policyFn([Uint8Array.from(c.state)]);
+      let diff = 0;
+      for (let j = 0; j < 18; j++) diff = Math.max(diff, Math.abs(root[j] - c.root_logits[j]));
+      if (await runCase(c, policyFn, true, T, logic, 'root logits max |diff| ' + sci(diff) +
+                        ' vs onnxruntime ' + fx.onnxruntime)) onnxPass++;
+    }
+
+    line('logic ' + logicPass + '/' + logicCases.length + ', onnx ' + onnxPass + '/' + onnxCases.length,
+         logicPass + onnxPass === cases.length ? 'pass' : 'fail');
+    const all = result.pass === result.total && result.total > 0;
+    finish('PARITY ' + result.pass + '/' + result.total + (all ? ' PASS' : ' FAIL'));
+  }
+
+  main().catch(function (e) {
+    line('harness error: ' + (e && e.stack ? e.stack : e), 'fail');
+    finish('PARITY ' + result.pass + '/' + result.total + ' FAIL');
+  });
+})();
+</script>
+</body>
+</html>

@@ -7,3 +7,5 @@ runs/
 data/
 .idea/
 .vscode/
+!tests/data/
+web/model/*.onnx

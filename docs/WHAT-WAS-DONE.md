@@ -108,6 +108,18 @@ When the page loads, it re-checks those vectors and the 3D turn animation agains
 The server (`rubiks/serve.py`) serves the page and two endpoints, `GET /solver` and `POST /solve`. It loads the
 checkpoint once at start-up.
 
+The page can also solve on its own, with no server. Its *Neural network (ONNX, in the browser)* backend runs
+`models/policy-v2.onnx` with ONNX Runtime Web (WebAssembly, loaded from cdnjs) and `web/search.js`, a JavaScript
+copy of the beam search in `rubiks/search.py`. The copy keeps the same move filter, cumulative log-probability scores
+(float32, after a log-softmax), duplicate removal and tie-breaking order, and it checks every child for the solved
+state before the beam is cut. It calls the network once per depth over the whole beam, and the beam width is a page
+setting from 64 to 4096 (default 1024). A fixture of 31 cases computed by the Python search
+(`tests/data/web-parity.json`) is checked by `pytest`, and in a browser by `web/search-test.html`. Twenty cases use
+the ONNX model, and eleven use an exact synthetic policy that forces score ties and so pins down the tie-breaking.
+The native and the WebAssembly builds of ONNX Runtime can differ in the last bits of the logits, so the ONNX
+scrambles were chosen so that no decision of the search depended on a score gap smaller than 1e-4. GitHub Pages
+publishes the page together with the model.
+
 ## What is next
 
 The next step is a cost-to-go network that estimates how many moves a state is from solved, paired with A* search,

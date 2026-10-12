@@ -525,6 +525,12 @@
       refresh();
       return;
     }
+    if (solver.id === 'onnx') {
+      const width = onnxWidth();
+      if (width === null) { showMsg(onnxWidthMessage(), 'warn'); return; }
+      solver.width = width;
+      solver.modelUrl = $('onnx-model').value.trim() || null;
+    }
     const token = { cancelled: false,
                     controller: typeof window.AbortController === 'function' ? new window.AbortController() : null };
     app.solveToken = token;
@@ -536,7 +542,10 @@
     if (token.cancelled) return;
     const state = Uint8Array.from(app.state);
     const context = { history: app.sinceSolved ? app.sinceSolved.slice() : null, logic: logic,
-                      signal: token.controller ? token.controller.signal : null };
+                      signal: token.controller ? token.controller.signal : null,
+                      onProgress: function (text) {
+                        if (app.solveToken === token && !token.cancelled) showProgress(text);
+                      } };
     let res;
     try {
       res = await solver.solve(Uint8Array.from(state), context);
@@ -559,7 +568,9 @@
     if (!res || typeof res !== 'object') res = { moves: null, source: solver.id, ms: 0 };
     const check = RS.verifySolution(logic, state, res.moves);
     const ms = typeof res.ms === 'number' ? res.ms : 0;
-    const timing = Math.round(ms) + ' ms' + (typeof res.serverMs === 'number' ? ' (server ' + Math.round(res.serverMs) + ' ms)' : '');
+    const timing = Math.round(ms) + ' ms' + (typeof res.serverMs === 'number' ? ' (server ' + Math.round(res.serverMs) + ' ms)' : '') +
+                   (typeof res.loadMs === 'number' ? ' (+ ' + Math.round(res.loadMs) + ' ms loading the model)' : '') +
+                   (typeof res.nodes === 'number' ? ', ' + res.nodes + ' nodes' : '');
     if (!check.valid) {
       app.lastSolve = (res.source || solver.id) + ': invalid answer, ' + timing;
       showMsg('solver returned an invalid move list (not move indices 0..' + (logic.NM - 1) + ')', 'error');
@@ -622,6 +633,7 @@
     if (app.solveToken !== token) return;  // a newer Solve owns the flag
     app.solveToken = null;
     app.solving = false;
+    showProgress('');
   }
 
   function doStop() {
@@ -648,6 +660,12 @@
     const el = $('msg');
     el.textContent = text;
     el.className = 'msg ' + (level || 'info');
+  }
+  /** The solver's progress line (one line per search depth for the in-browser network); '' hides it. */
+  function showProgress(text) {
+    const el = $('progress');
+    el.textContent = text || '';
+    el.hidden = !text;
   }
   function clearMsgIfInfo() {
     const el = $('msg');
@@ -771,6 +789,7 @@
       const s = currentSolver();
       save('backend', s.id);
       $('remote-row').hidden = s.id !== 'remote';
+      $('onnx-row').hidden = s.id !== 'onnx';
       if (announce && !s.available) showMsg(s.label + ': ' + s.unavailableReason, 'warn');
       else if (announce) clearMsgIfInfo();
     };
@@ -779,6 +798,29 @@
     const remote = solverById('remote');
     if (remote) $('remote-url').value = remote.url;
     $('remote-url').placeholder = defaultRemoteUrl();
+    const width = $('onnx-width');
+    width.min = String(RS.OnnxSolver.WIDTH_MIN);
+    width.max = String(RS.OnnxSolver.WIDTH_MAX);
+    width.value = load('onnxWidth', String(RS.OnnxSolver.WIDTH_DEFAULT));
+    if (onnxWidth() === null) width.value = String(RS.OnnxSolver.WIDTH_DEFAULT);
+    width.addEventListener('change', function () {
+      const w = onnxWidth();
+      if (w === null) { showMsg(onnxWidthMessage(), 'warn'); return; }
+      save('onnxWidth', String(w));
+      clearMsgIfInfo();
+    });
+    $('onnx-model').value = load('onnxModel', '');
+    $('onnx-model').addEventListener('change', function () { save('onnxModel', $('onnx-model').value.trim()); });
+  }
+
+  /** The in-browser network's beam width setting, or null when it is not a whole number in range. */
+  function onnxWidth() {
+    const text = $('onnx-width').value.trim();
+    const w = /^\d+$/.test(text) ? Number(text) : NaN;
+    return Number.isInteger(w) && w >= RS.OnnxSolver.WIDTH_MIN && w <= RS.OnnxSolver.WIDTH_MAX ? w : null;
+  }
+  function onnxWidthMessage() {
+    return 'beam width must be a whole number from ' + RS.OnnxSolver.WIDTH_MIN + ' to ' + RS.OnnxSolver.WIDTH_MAX;
   }
 
   function buildSpeed() {
