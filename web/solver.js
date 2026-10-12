@@ -512,6 +512,7 @@
   const ONNX_OUTPUT = 'logits';   // float32 (batch, 18), the order of CUBE_TABLES.move_names
   const N_COLOURS = 6;
   const FILE_REASON = 'needs a server or the Pages URL: this page is opened as file://';
+  const RELEASE_WAIT_MS = 2000;   // a session release that has not settled by then is not waited for
 
   function isFilePage() {
     return !!(root.location && root.location.protocol === 'file:');
@@ -521,6 +522,16 @@
 
   /** Let the browser paint and handle clicks (Stop) between search depths. */
   function yieldToBrowser() { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
+
+  /** Release an ONNX Runtime session (its WebAssembly memory) where the build supports it. Never rejects, and never
+   *  waits longer than RELEASE_WAIT_MS, so a stuck release cannot hold up the next search. */
+  function releaseSession(session) {
+    if (!session || typeof session.release !== 'function') return Promise.resolve();
+    let timer = null;
+    const released = Promise.resolve().then(function () { return session.release(); }).catch(function () {});
+    const waited = new Promise(function (resolve) { timer = setTimeout(resolve, RELEASE_WAIT_MS); });
+    return Promise.race([released, waited]).then(function () { clearTimeout(timer); });
+  }
 
   /** Add a classic script tag once; resolves when it has run. */
   function loadScript(url) {
@@ -542,6 +553,11 @@
    * beam search of search.js, which reproduces rubiks/search.py beam_search: width this.width (the page's setting,
    * 64..4096, default 1024), at most 40 moves, one session.run per depth over the whole beam. Under file:// the
    * browser cannot fetch the model, so the backend reports itself unavailable there.
+   *
+   * Sessions: a model that loads but does not have the expected input and output is released at once. When a new
+   * model setting (or ONNX Runtime version) replaces the loaded session, the old one is released after every search
+   * queued before the replacement has finished (the release is queued on the same lock the searches take), so no
+   * running search loses its session. A policy function from createPolicyFn is valid until such a replacement.
    */
   class OnnxSolver extends Solver {
     constructor(logic, options) {
@@ -604,7 +620,8 @@
 
     /** Load ONNX Runtime and the model once; returns {session, url, name, threads, ortVersion, loadMs}. */
     async ensureSession(onProgress) {
-      const key = this.modelCandidates().join('\n') + '\n' + this.ortVersion;
+      const candidates = this.modelCandidates();  // read once: the key and the URLs tried always agree
+      const key = candidates.join('\n') + '\n' + this.ortVersion;
       if (this.loaded && this.loaded.key === key) return Object.assign({}, this.loaded, { loadMs: 0 });
       if (!this._loading || this._loading.key !== key) {
         const self = this;
@@ -612,7 +629,7 @@
           const t0 = now();
           const ort = await self.loadOrt(onProgress);
           const tried = [];
-          for (const url of self.modelCandidates()) {
+          for (const url of candidates) {
             if (onProgress) onProgress('loading the model: ' + url + '…');
             let resp;
             try {
@@ -636,6 +653,7 @@
             if (session.inputNames.indexOf(ONNX_INPUT) < 0 || session.outputNames.indexOf(ONNX_OUTPUT) < 0) {
               tried.push(url + ' (inputs ' + session.inputNames.join(',') + ', outputs ' +
                          session.outputNames.join(',') + '; expected ' + ONNX_INPUT + ' -> ' + ONNX_OUTPUT + ')');
+              await releaseSession(session);  // rejected: nothing else holds it
               continue;
             }
             const file = url.split(/[?#]/)[0].split('/').pop() || url;
@@ -651,11 +669,37 @@
       const loading = this._loading;
       try {
         const rec = await loading.promise;
-        this.loaded = rec;
+        if (this.loaded !== rec) {  // every caller awaiting this load gets here; only the first replaces
+          const previous = this.loaded;
+          this.loaded = rec;
+          if (previous && previous.session !== rec.session) this._retire(previous.session);
+        }
         return rec;
       } finally {
         if (this._loading === loading) this._loading = null;  // a failed load is retried on the next solve
       }
+    }
+
+    /** Release a session that a newer load replaced, once every search queued on the lock before now has finished
+     *  (searches started later use this.loaded, never the old session). */
+    _retire(session) {
+      this._lock = this._lock.then(function () { return releaseSession(session); });
+    }
+
+    /** The model's output for a batch of n states must be float32 logits of shape [n, 18] (models/policy-v2.onnx.json);
+     *  anything else is an error with the type and shape it had, never reinterpreted. Returns the n * 18 values. */
+    static checkLogits(y, n, nm) {
+      const dims = y && y.dims && typeof y.dims.length === 'number' ? Array.from(y.dims) : null;
+      const ok = !!y && y.type === 'float32' && dims !== null && dims.length === 2 && dims[0] === n &&
+                 dims[1] === nm && !!y.data && y.data.length === n * nm;
+      if (!ok) {
+        const shape = dims ? dims.join(', ') : String(y && y.dims);
+        const count = y && y.data && typeof y.data.length === 'number' ? y.data.length : 'no';
+        const got = !y ? 'no "' + ONNX_OUTPUT + '" output'
+          : '"' + ONNX_OUTPUT + '" of type ' + String(y.type) + ', shape [' + shape + '], ' + count + ' values';
+        throw new SolverError('the model returned ' + got + '; expected float32 [' + n + ', ' + nm + ']', 'protocol');
+      }
+      return y.data;
     }
 
     /** The policy function search.js calls: one session.run over the whole batch, logits (n * 18). */
@@ -667,12 +711,7 @@
         const feeds = {};
         feeds[ONNX_INPUT] = new ort.Tensor('float32', OnnxSolver.encode(states), [n, 54 * N_COLOURS]);
         const out = await session.run(feeds);
-        const y = out[ONNX_OUTPUT];
-        if (!y || !y.data || y.data.length !== n * NM) {
-          throw new SolverError('the model returned ' + (y && y.data ? y.data.length : 'no') + ' logits, expected ' +
-                                n + ' x ' + NM, 'protocol');
-        }
-        return y.data;
+        return OnnxSolver.checkLogits(out[ONNX_OUTPUT], n, NM);
       };
     }
 

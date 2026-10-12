@@ -113,12 +113,15 @@ The page can also solve on its own, with no server. Its *Neural network (ONNX, i
 copy of the beam search in `rubiks/search.py`. The copy keeps the same move filter, cumulative log-probability scores
 (float32, after a log-softmax), duplicate removal and tie-breaking order, and it checks every child for the solved
 state before the beam is cut. It calls the network once per depth over the whole beam, and the beam width is a page
-setting from 64 to 4096 (default 1024). A fixture of 31 cases computed by the Python search
-(`tests/data/web-parity.json`) is checked by `pytest`, and in a browser by `web/search-test.html`. Twenty cases use
-the ONNX model, and eleven use an exact synthetic policy that forces score ties and so pins down the tie-breaking.
-The native and the WebAssembly builds of ONNX Runtime can differ in the last bits of the logits, so the ONNX
-scrambles were chosen so that no decision of the search depended on a score gap smaller than 1e-4. GitHub Pages
-publishes the page together with the model.
+setting from 64 to 4096 (default 1024). A fixture of 70 cases (`tests/data/web-parity.json`) holds the answers of
+the Python search, with the policy normalised by `torch.log_softmax` as the Python solver does it. `pytest` checks
+it, and `web/search-test.html` checks `web/search.js` against it in a browser, with the JavaScript log-softmax
+(computed in float64 and rounded to float32). Twenty cases use the ONNX model. Eleven use an exact synthetic policy
+that forces score ties and so pins down the tie-breaking. Twenty-seven use the same synthetic values as logits, with a
+common offset of 0, 1e6 or 1e30. The last twelve use logits built to give near ties, or exact ties that a log-softmax
+written as x - (max + log(sum)) gets wrong at the offset 1e30. The native and the WebAssembly builds of ONNX Runtime
+can differ in the last bits of the logits, so the ONNX scrambles were chosen so that no decision of the search
+depended on a score gap smaller than 1e-4. GitHub Pages publishes the page together with the model.
 
 ## What is next
 

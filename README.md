@@ -158,7 +158,7 @@ before the beam is cut, one network call per depth over the whole beam, and at m
   order in which the page looks for the model.
 - ONNX Runtime runs single-threaded here, because GitHub Pages does not send the headers that WebAssembly threads
   need.
-- **Parity check.** `tests/test_web_search_parity.py` writes `tests/data/web-parity.json`, 31 cases solved by the
+- **Parity check.** `tests/test_web_search_parity.py` writes `tests/data/web-parity.json`, 70 cases solved by the
   Python search (20 scrambles with the ONNX model and 11 with an exact synthetic policy that forces score ties), and
   checks that the Python search still gives the same answers. `web/search-test.html` runs the same cases through
   `web/search.js` in a browser. To run it locally, start a server from the repository root and open the harness
@@ -169,7 +169,7 @@ before the beam is cut, one network call per depth over the whole beam, and at m
   # then open http://127.0.0.1:8777/web/search-test.html in a browser
   ```
 
-  When every case matches, the page title becomes `PARITY 31/31 PASS`. It passed 31/31 in Chrome with ONNX Runtime
+  When every case matches, the page title becomes `PARITY 70/70 PASS`. It passed 70/70 in Chrome with ONNX Runtime
   Web 1.20.1: the model loaded in 625 ms, and the network's 18 logits for each case's start state were within 3.3e-6
   of those from `onnxruntime` in Python.
 

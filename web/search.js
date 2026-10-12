@@ -33,8 +33,10 @@
  *   - otherwise duplicate states are removed (the best-scored copy survives, ties to the earliest child), and the
  *     `width` best states form the next beam, ordered by score (descending), ties by the state key (ascending):
  *     exactly the order of search.py's stable sorts;
- *   - width 1 is a greedy walk.
- * The log-softmax runs in float64 and is rounded to float32 (search.py receives float32 log-probabilities).
+ *   - beam width 1 keeps one state per depth; as at every width, all the allowed children of that state are checked
+ *     for the solved state before the cut (search.py beam_search, not its greedy_solve).
+ * The log-softmax is (x - max) - log(sum of exp(x - max)) in float64, rounded to float32 (search.py receives the
+ * float32 output of torch.log_softmax), so a large common offset in a row of logits cancels exactly.
  */
 (function (root) {
   'use strict';
@@ -124,8 +126,11 @@
   // ------------------------------------------------------------------------------------------------------------
   // Policy helpers
   // ------------------------------------------------------------------------------------------------------------
-  /** Row-wise log-softmax of rows x 18 logits: float64 (max, then sum of exp in move order, then log),
-   *  rounded to float32. NaN or infinite logits give NaN, which beamSearch reports as an error. */
+  /** Row-wise log-softmax of rows x 18 logits, in float64: (x - max) - log(sum of exp(x - max)), the exponentials
+   *  summed in move order; the result is rounded to float32. The maximum is subtracted before anything else, so a
+   *  large common offset (1e6, 1e30) cancels exactly instead of swallowing the log term. A NaN or +Infinity logit, or
+   *  a row of -Infinity only, gives a NaN row, which beamSearch reports as an error; a -Infinity logit among finite
+   *  ones gives -Infinity (as torch.log_softmax does). */
   function logSoftmax(logits, rows) {
     const out = new Float32Array(rows * N_MOVES);
     for (let r = 0; r < rows; r++) {
@@ -137,8 +142,8 @@
       }
       let s = 0;
       for (let j = 0; j < N_MOVES; j++) s += Math.exp(logits[base + j] - mx);
-      const lse = mx + Math.log(s);
-      for (let j = 0; j < N_MOVES; j++) out[base + j] = logits[base + j] - lse;  // Float32Array rounds
+      const logSum = Math.log(s);
+      for (let j = 0; j < N_MOVES; j++) out[base + j] = (logits[base + j] - mx) - logSum;  // Float32Array rounds
     }
     return out;
   }

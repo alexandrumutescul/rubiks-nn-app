@@ -18,9 +18,11 @@
 <body>
 <h1>Parity: web/search.js against rubiks/search.py</h1>
 <p>Runs every case of <code>tests/data/web-parity.json</code> (written by <code>tests/test_web_search_parity.py</code>
-  from <code>rubiks.search.beam_search</code>) through <code>web/search.js</code>: the <em>logic</em> cases with an
-  exact synthetic policy, the <em>onnx</em> cases with <code>models/policy-v2.onnx</code> in ONNX Runtime Web, loaded
-  exactly as the page loads it. Serve the repository root (<code>python -m rubiks.serve --web .</code>) and open
+  from <code>rubiks.search.beam_search</code>, with <code>torch.log_softmax</code> as the Python solver uses it)
+  through <code>web/search.js</code>, with its own log-softmax: the <em>logic</em> cases with an exact synthetic policy
+  used as log-probabilities, the <em>logits</em> and <em>ties</em> cases with synthetic logits (large common offsets,
+  near ties), and the <em>onnx</em> cases with <code>models/policy-v2.onnx</code> in ONNX Runtime Web, loaded exactly
+  as the page loads it. Serve the repository root (<code>python -m rubiks.serve --web .</code>) and open
   <code>/web/search-test.html</code>. URL parameters: <code>fixture=URL</code>, <code>model=URL</code>,
   <code>ort=VERSION</code>.</p>
 <p><label>Fixture file (only needed when the page cannot fetch it):
@@ -36,7 +38,15 @@
   'use strict';
 
   const FORMAT = 'rubiks-nn web search parity';
-  const LOGIC_POLICY = 'misplaced-hash-v1';
+  // The fixture's policies this page implements, by the name the fixture gives them; normalize: search.js
+  // log-softmaxes the policy's output (true) or takes it as log-probabilities (false).
+  const POLICIES = {
+    logic: { name: 'misplaced-hash-v1', normalize: false },
+    logits: { name: 'misplaced-hash-v1-logits', normalize: true },
+    ties: { name: 'misplaced-ties-v1', normalize: true },
+    onnx: { name: 'models/policy-v2.onnx', normalize: true },
+  };
+  const SYNTHETIC = ['logic', 'logits', 'ties'];
   const FIXTURE_URLS = ['../tests/data/web-parity.json', 'web-parity.json'];
   const params = new URLSearchParams(window.location.search);
   const logEl = document.getElementById('log');
@@ -76,11 +86,23 @@
     return moves === null ? 'no solution' : moves.length + ' moves [' + logic.formatMoves(moves) + ']';
   }
 
-  /** The fixture's synthetic policy (tests/test_web_search_parity.py logic_values): for move m,
-   *  child = state after m; value = -(4 * misplaced(child) + (sum_i child[i] * (i + 1)) mod 5) / 64. */
-  function logicPolicy(T) {
+  /** The fixture's synthetic policies (tests/test_web_search_parity.py), for one case. For move m: child = the state
+   *  after m (child[i] = state[perm_m[i]]), misplaced = #{i: child[i] != solved[i]}, h = (sum_i child[i] * (i + 1))
+   *  mod 5. Each value is computed in float64 in this order and stored as float32, as numpy does:
+   *    logic   -(4 * misplaced + h) / 64                        (log-probabilities)
+   *    logits  offset + -(4 * misplaced + h) / 64               (logits)
+   *    ties    offset - scale * floor(misplaced / 8) + eps * h  (logits)
+   *  Returns null when the case lacks a number the policy needs. */
+  function syntheticPolicy(T, c) {
     const perms = T.move_perms;
     const solved = T.solved;
+    const kind = c.policy;
+    const offset = c.offset;
+    const scale = c.scale;
+    const eps = c.eps;
+    const finite = function (x) { return typeof x === 'number' && isFinite(x); };
+    if (kind !== 'logic' && !finite(offset)) return null;
+    if (kind === 'ties' && !(finite(scale) && finite(eps))) return null;
     return async function (states) {
       const out = new Float32Array(states.length * 18);
       for (let r = 0; r < states.length; r++) {
@@ -90,11 +112,15 @@
           let misplaced = 0;
           let h = 0;
           for (let i = 0; i < 54; i++) {
-            const c = s[p[i]];
-            if (c !== solved[i]) misplaced++;
-            h += c * (i + 1);
+            const col = s[p[i]];
+            if (col !== solved[i]) misplaced++;
+            h += col * (i + 1);
           }
-          out[r * 18 + m] = -(4 * misplaced + (h % 5)) / 64;
+          let v;
+          if (kind === 'logic') v = -(4 * misplaced + (h % 5)) / 64;
+          else if (kind === 'logits') v = offset + -(4 * misplaced + (h % 5)) / 64;
+          else v = offset - scale * Math.floor(misplaced / 8) + eps * (h % 5);
+          out[r * 18 + m] = v;
         }
       }
       return out;
@@ -147,7 +173,10 @@
   async function runCase(c, policyFn, normalize, T, logic, extra) {
     const state = Uint8Array.from(c.state);
     const head = c.id + ' (scramble ' + c.scramble.length + ', width ' + c.width + ', max depth ' + c.max_depth +
-                 (c.no_backtrack === false ? ', no_backtrack off' : '') + ')';
+                 (c.no_backtrack === false ? ', no_backtrack off' : '') +
+                 (typeof c.offset === 'number' ? ', offset ' + c.offset : '') +
+                 (typeof c.scale === 'number' ? ', scale ' + c.scale : '') +
+                 (typeof c.eps === 'number' ? ', eps ' + c.eps : '') + ')';
     const t0 = performance.now();
     let res = null;
     let error = null;
@@ -174,7 +203,7 @@
           (solves ? '' : ' (DOES NOT SOLVE)');
     }
     detail += ', ' + Math.round(ms) + ' ms' + (extra ? '; ' + extra : '');
-    if (!ok && c.policy === 'onnx') detail += '; decision margin ' + sci(c.margin);
+    if (!ok) detail += '; smallest decision gap ' + sci(c.margin) + ', smallest nonzero gap ' + sci(c.near_gap);
     line((ok ? 'PASS ' : 'FAIL ') + head + ': ' + detail, ok ? 'pass' : 'fail');
     result.cases.push({ id: c.id, ok: ok, detail: detail });
     if (ok) result.pass++;
@@ -203,26 +232,42 @@
     }
     const cases = fx.cases;
     result.total = cases.length;
-    const logicCases = cases.filter(function (c) { return c.policy === 'logic'; });
-    const onnxCases = cases.filter(function (c) { return c.policy === 'onnx'; });
-    line(cases.length + ' cases: ' + logicCases.length + ' logic, ' + onnxCases.length + ' onnx; fixture from ' +
-         'onnxruntime ' + fx.onnxruntime + ', model sha256 ' + fx.model_sha256);
-
-    // 1. logic cases: pure JavaScript, exact arithmetic, many exact ties
-    let logicPass = 0;
-    const logicName = fx.logic_policy && fx.logic_policy.name;
-    for (const c of logicCases) {
-      if (logicName !== LOGIC_POLICY) {
-        line('FAIL ' + c.id + ': the fixture uses logic policy "' + logicName + '", this page implements "' +
-             LOGIC_POLICY + '"', 'fail');
-        result.cases.push({ id: c.id, ok: false, detail: 'unknown logic policy' });
+    const byPolicy = {};
+    const passed = {};
+    Object.keys(POLICIES).forEach(function (k) { byPolicy[k] = []; passed[k] = 0; });
+    const fxPolicies = fx.policies || {};
+    for (const c of cases) {
+      const known = POLICIES[c.policy];
+      const given = fxPolicies[c.policy] && fxPolicies[c.policy].name;
+      if (!known || given !== known.name) {
+        line('FAIL ' + c.id + ': the fixture\'s policy "' + c.policy + '" (' + given + ') is not one this page ' +
+             'implements (' + Object.keys(POLICIES).map(function (k) { return k + ': ' + POLICIES[k].name; })
+               .join(', ') + ')', 'fail');
+        result.cases.push({ id: c.id, ok: false, detail: 'unknown policy' });
         continue;
       }
-      if (await runCase(c, logicPolicy(T), false, T, logic, '')) logicPass++;
+      byPolicy[c.policy].push(c);
+    }
+    line(cases.length + ' cases: ' + Object.keys(POLICIES).map(function (k) { return byPolicy[k].length + ' ' + k; })
+           .join(', ') + '; expected answers from onnxruntime ' + fx.onnxruntime + ', torch ' + fx.torch +
+         ', model sha256 ' + fx.model_sha256);
+
+    // 1. synthetic policies: pure JavaScript. logic: exact arithmetic and many exact ties; logits: large common
+    //    offsets; ties: near ties, and exact ties at the offset 1e30 that x - (max + log(sum)) gets wrong
+    for (const kind of SYNTHETIC) {
+      for (const c of byPolicy[kind]) {
+        const policyFn = syntheticPolicy(T, c);
+        if (!policyFn) {
+          line('FAIL ' + c.id + ': the case lacks the offset, scale or eps of its policy', 'fail');
+          result.cases.push({ id: c.id, ok: false, detail: 'malformed case' });
+          continue;
+        }
+        if (await runCase(c, policyFn, POLICIES[kind].normalize, T, logic, '')) passed[kind]++;
+      }
     }
 
     // 2. onnx cases: ONNX Runtime Web + the model, loaded by the page's own OnnxSolver
-    let onnxPass = 0;
+    const onnxCases = byPolicy.onnx;
     const solver = new RS.OnnxSolver(logic, { ortVersion: params.get('ort') || undefined,
                                               modelUrl: params.get('model') || undefined });
     let policyFn = null;
@@ -255,12 +300,12 @@
       const root = await policyFn([Uint8Array.from(c.state)]);
       let diff = 0;
       for (let j = 0; j < 18; j++) diff = Math.max(diff, Math.abs(root[j] - c.root_logits[j]));
-      if (await runCase(c, policyFn, true, T, logic, 'root logits max |diff| ' + sci(diff) +
-                        ' vs onnxruntime ' + fx.onnxruntime)) onnxPass++;
+      if (await runCase(c, policyFn, POLICIES.onnx.normalize, T, logic, 'root logits max |diff| ' + sci(diff) +
+                        ' vs onnxruntime ' + fx.onnxruntime)) passed.onnx++;
     }
 
-    line('logic ' + logicPass + '/' + logicCases.length + ', onnx ' + onnxPass + '/' + onnxCases.length,
-         logicPass + onnxPass === cases.length ? 'pass' : 'fail');
+    line(Object.keys(POLICIES).map(function (k) { return k + ' ' + passed[k] + '/' + byPolicy[k].length; }).join(', '),
+         result.pass === cases.length ? 'pass' : 'fail');
     const all = result.pass === result.total && result.total > 0;
     finish('PARITY ' + result.pass + '/' + result.total + (all ? ' PASS' : ' FAIL'));
   }
