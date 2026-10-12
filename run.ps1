@@ -10,7 +10,7 @@
   solved (and, with -MaxDepth 6 or more, one six moves from solved). The start counts as a success only if that
   answer comes back verified; otherwise the script exits with an error and leaves the container running for
   docker logs rubiks-nn-app. If the app is already running (a container named rubiks-nn-app or labelled
-  app=rubiks-nn-app) it prints its address instead.
+  app=rubiks-nn-app), that copy gets the same checks (the first test cube only) and its address is printed instead.
 
 .EXAMPLE
   .\run.ps1
@@ -60,6 +60,7 @@ $LocalImage = 'rubiks-nn-app'
 $PortSpan = 35
 $HealthTimeout = 60
 $SolveTimeout = 30   # seconds each test solve may take
+$StopTimeout = 10    # seconds "stop" waits, after docker stop and docker rm, for the app's containers to be gone
 # The start-up test cubes, as states (54 colours). The first is one turn from solved, so it must come back solved at
 # any -MaxDepth; the second, six moves from solved, is checked as well when -MaxDepth is 6 or more.
 $TestMoves = 'R'
@@ -140,6 +141,25 @@ function Get-AppContainers {
     }
 }
 
+function Get-AppIdsLeft {
+    # The ids of the app's containers that still exist (named $Name or labelled $Label, in any state), each once, as
+    # @{ Ok; Ids }. Ok is $false when Docker could not be asked.
+    $byLabel = @(& docker ps -a -q --no-trunc --filter "label=$Label" 2>$null)
+    if ($LASTEXITCODE -ne 0) { return @{ Ok = $false; Ids = @() } }
+    $all = @(& docker ps -a --no-trunc --format '{{.ID}} {{.Names}}' 2>$null)
+    if ($LASTEXITCODE -ne 0) { return @{ Ok = $false; Ids = @() } }
+    $ids = @()
+    foreach ($line in $all) {
+        $parts = @(([string]$line).Trim() -split ' ', 2)
+        if ($parts.Count -eq 2 -and $parts[1] -ceq $Name -and $ids -notcontains $parts[0]) { $ids += $parts[0] }
+    }
+    foreach ($raw in $byLabel) {
+        $id = ([string]$raw).Trim()
+        if ($id -ne '' -and $ids -notcontains $id) { $ids += $id }
+    }
+    return @{ Ok = $true; Ids = $ids }
+}
+
 function Open-Url([string]$Url) {
     try { Start-Process $Url } catch { Write-Host "(could not open a browser; open the address above by hand)" }
 }
@@ -176,6 +196,30 @@ function Invoke-SolveCheck([string]$Id, [string]$State) {
     return @{ Code = $code; Text = ($out | Out-String).Trim() }
 }
 
+# Checks of a running container: after a start, and for a copy that is already running.
+function Wait-Ready([string]$Id, [int]$P) {
+    # waits up to $HealthTimeout s until GET /solver on host port $P answers: 'up', 'stopped' (the container is no
+    # longer running) or 'timeout'
+    $deadline = (Get-Date).AddSeconds($HealthTimeout)
+    while (-not (Test-Up $P)) {
+        if ((Get-ContainerState $Id) -ne 'running') { return 'stopped' }
+        if ((Get-Date) -gt $deadline) { return 'timeout' }
+        Start-Sleep -Seconds 1
+    }
+    return 'up'
+}
+
+function Invoke-FirstTestSolve([string]$Id, [string]$Note) {
+    # the mandatory test solve ($TestMoves): exits with an error that ends in $Note unless the answer comes back
+    # verified
+    $check = Invoke-SolveCheck $Id $TestState
+    switch ($check.Code) {
+        0 { Write-Host "test solve OK: the network solved $TestMoves with $($check.Text)" }
+        3 { Fail "the test solve ($TestMoves) got no answer within $SolveTimeout s: $($check.Text); $Note" }
+        default { Fail "the test solve ($TestMoves) failed: $($check.Text); $Note" }
+    }
+}
+
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Fail 'docker not found: install Docker Desktop'
 }
@@ -184,19 +228,51 @@ if ($LASTEXITCODE -ne 0) { Fail 'cannot talk to Docker: is Docker Desktop runnin
 
 if ($Command -eq 'stop') {
     $found = @(Get-AppContainers)
+    $failures = @()
+    foreach ($c in $found) {
+        # docker stop and docker rm also fail for a container that is already gone or already being removed (--rm),
+        # so a failure counts only if the container is still there afterwards (checked below)
+        $out = & docker stop $c.Id 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $failures += "docker stop $($c.Name): " + ((@($out) | ForEach-Object { "$_".Trim() }) -join ' ')
+        }
+        $out = & docker rm -f $c.Id 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $failures += "docker rm -f $($c.Name): " + ((@($out) | ForEach-Object { "$_".Trim() }) -join ' ')
+        }
+    }
+    # No container of the app may be left, by name or label. Removal by --rm can lag docker stop by a moment.
+    $deadline = (Get-Date).AddSeconds($StopTimeout)
+    while ($true) {
+        $left = Get-AppIdsLeft
+        if ($left.Ok -and $left.Ids.Count -eq 0) { break }
+        if ((Get-Date) -gt $deadline) {
+            $said = ''
+            if ($failures.Count -gt 0) { $said = "`ndocker said:`n  " + ($failures -join "`n  ") }
+            if (-not $left.Ok) {
+                Fail ("cannot check that the app has stopped (docker ps failed); check with " +
+                      "docker ps -a --filter label=$Label$said")
+            }
+            $list = @(foreach ($leftId in $left.Ids) {
+                $info = & docker container inspect -f '{{.Name}} (state: {{.State.Status}})' $leftId 2>$null
+                if ($LASTEXITCODE -eq 0 -and $info) { ([string]$info).Trim().TrimStart('/') } else { $leftId }
+            })
+            Fail ("a container of this app is still there after $StopTimeout s:`n  " + ($list -join "`n  ") + $said +
+                  "`nremove it by hand (docker rm -f <name>) and run .\run.ps1 stop again")
+        }
+        Start-Sleep -Seconds 1
+    }
     if ($found.Count -eq 0) {
         Write-Host "$Name is not running"
     } else {
-        foreach ($c in $found) {
-            & docker stop $c.Id *> $null
-            & docker rm -f $c.Id *> $null   # normally already gone (--rm)
-            Write-Host "stopped $($c.Name)"
-        }
+        foreach ($c in $found) { Write-Host "stopped $($c.Name)" }
     }
     exit 0
 }
 
 # -- already running? ------------------------------------------------------------------------------------------------
+# A running copy gets the same checks as a new start (GET /solver answers, then the first test cube comes back
+# verified) before its address is printed; if they fail, the container is left as it is.
 $found = @(Get-AppContainers)
 $running = @($found | Where-Object { $_.State -eq 'running' })
 if ($running.Count -gt 0) {
@@ -205,6 +281,19 @@ if ($running.Count -gt 0) {
     if ($runningPort -eq '') {
         Fail "$($c.Name) (a container of this app) is running but publishes no port; stop it with .\run.ps1 stop"
     }
+    $leftAsIs = "$($c.Name) is left as it is, so you can look: docker logs $($c.Name); stop it with .\run.ps1 stop"
+    Write-Host "$($c.Name) is already running on port $runningPort; checking that it answers ..."
+    $ready = Wait-Ready $c.Id $runningPort
+    if ($ready -eq 'stopped') {
+        $st = Get-ContainerState $c.Id
+        if ($st -ne '') { $st = " (state: $st)" }
+        Fail ("$($c.Name) stopped while this script waited for it to answer$st; docker logs $($c.Name) shows why " +
+              'while the container exists. Run .\run.ps1 again to start the app')
+    }
+    if ($ready -eq 'timeout') {
+        Fail "$($c.Name) gives no answer on http://localhost:$runningPort/solver after $HealthTimeout s; $leftAsIs"
+    }
+    Invoke-FirstTestSolve $c.Id $leftAsIs
     Write-Host "$($c.Name) is already running: open http://localhost:$runningPort/"
     Write-Host '(stop it with .\run.ps1 stop)'
     if ($Open) { Open-Url "http://localhost:$runningPort/" }
@@ -295,26 +384,18 @@ if ($chosen -eq 0) {
 # -- wait until it answers ---------------------------------------------------------------------------------------------
 $leftRunning = "the container is left running so you can look: docker logs $Name; stop it with .\run.ps1 stop"
 Write-Host "started $Name on port $chosen (beam $Beam, max depth $MaxDepth); waiting for the server ..."
-$deadline = (Get-Date).AddSeconds($HealthTimeout)
-while (-not (Test-Up $chosen)) {
-    if ((Get-ContainerState $started) -ne 'running') {
-        Fail ("the container stopped during start-up; to see why, run it in the foreground:`n" +
-              "  docker run --rm --name $Name --label $Label -p ${chosen}:8765 " +
-              "-e BEAM=$Beam -e MAX_DEPTH=$MaxDepth $Image")
-    }
-    if ((Get-Date) -gt $deadline) {
-        Fail "no answer on http://localhost:$chosen/solver after $HealthTimeout s; $leftRunning"
-    }
-    Start-Sleep -Seconds 1
+$ready = Wait-Ready $started $chosen
+if ($ready -eq 'stopped') {
+    Fail ("the container stopped during start-up; to see why, run it in the foreground:`n" +
+          "  docker run --rm --name $Name --label $Label -p ${chosen}:8765 " +
+          "-e BEAM=$Beam -e MAX_DEPTH=$MaxDepth $Image")
+}
+if ($ready -eq 'timeout') {
+    Fail "no answer on http://localhost:$chosen/solver after $HealthTimeout s; $leftRunning"
 }
 
 # -- real solves, so "up" means the network answers, not only the web server -------------------------------------------
-$check = Invoke-SolveCheck $started $TestState
-switch ($check.Code) {
-    0 { Write-Host "test solve OK: the network solved $TestMoves with $($check.Text)" }
-    3 { Fail "the test solve ($TestMoves) got no answer within $SolveTimeout s: $($check.Text); $leftRunning" }
-    default { Fail "the test solve ($TestMoves) failed: $($check.Text); $leftRunning" }
-}
+Invoke-FirstTestSolve $started $leftRunning
 if ($MaxDepth -ge 6) {
     $check = Invoke-SolveCheck $started $Test2State
     switch ($check.Code) {

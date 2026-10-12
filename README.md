@@ -34,8 +34,10 @@ docker run --rm --name rubiks-nn-app --label app=rubiks-nn-app -p 8765:8765 ghcr
 
 Open <http://localhost:8765/> and press Ctrl-C to stop. If port 8765 is taken, change the number on the left, e.g.
 `-p 8766:8765`, and open <http://localhost:8766/> instead. The name and the label let `run.sh` and `run.ps1` see
-that this copy is running, so they print its address instead of starting a second one. If Docker says that the name
-is already in use, the app is already running; `docker stop rubiks-nn-app` stops it.
+that this copy is running, so they check it and print its address instead of starting a second one. If Docker says
+that the name is already in use, a container of that name exists; it keeps the name whether it is running, stopped
+or only created. `docker ps -a --filter name=rubiks-nn-app` shows it. Reuse it with `docker start rubiks-nn-app`,
+or, once you are sure it is stale, remove it with `docker rm -f rubiks-nn-app` and run the command again.
 
 ### 2. `./run.sh` (picks a free port for you)
 
@@ -62,9 +64,10 @@ cd rubiks-nn-app
    `--beam` leaves the second cube unsolved, `run.sh` only warns;
 5. prints `open http://localhost:<port>/`.
 
-If the app is already running, `run.sh` prints its address and does not start a second copy. It finds the app's
-container by the name `rubiks-nn-app` or the label `app=rubiks-nn-app`, so a copy started with the `docker run`
-command above or with Docker Compose counts too.
+If the app is already running, `run.sh` does not start a second copy. It checks the running one as in step 4 (the
+first test cube only) and prints its address; if the check fails, it exits with an error and leaves that container
+as it is. It finds the app's container by the name `rubiks-nn-app` or the label `app=rubiks-nn-app`, so a copy
+started with the `docker run` command above or with Docker Compose counts too.
 
 | option | default | meaning |
 |---|---|---|
