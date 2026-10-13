@@ -73,6 +73,7 @@ started with the `docker run` command above or with Docker Compose counts too.
 |---|---|---|
 | `--image IMAGE` | build locally | use this image instead of building one |
 | `--port N` | `$PORT` or 8765 | first port to try (N to N+35 are tried) |
+| `--backend policy\|hybrid` | `$BACKEND` or policy | server search method (`-Backend` in PowerShell, default policy) |
 | `--beam N` | `$BEAM` or 1024 | beam width of the search |
 | `--max-depth N` | `$MAX_DEPTH` or 40 | longest solution the search tries |
 | `--open` | off | open the page in the default browser |
@@ -117,10 +118,11 @@ Then open <http://localhost:8765/>.
 - `--host 0.0.0.0` makes the server reachable from a phone on the same network.
 - `rubiks-nn-serve` is an installed alias for `python -m rubiks.serve`, and `python -m rubiks.serve --help` lists
   every flag.
-- To run the tests: `pip install -e ".[dev]"`, then `python -m pytest`.
+- To run the tests, including ONNX export checks: `pip install -e ".[dev,export]"`, then `python -m pytest`.
 - The optional `pip install -e ".[kociemba]"` installs the two-phase solver package. With it, the server falls
-  back to the two-phase solver when the beam search finds no solution within its limits (`--fallback kociemba`,
-  the default outside Docker). The Docker image runs without a fallback.
+  back to the two-phase solver when the selected search finds no solution within its limits (`--fallback kociemba`,
+  the default outside Docker). With hybrid, this happens only after both A* and beam fail. The Docker image has
+  no kociemba fallback; hybrid's own policy fallback is always available.
 
 ## Using the app
 
@@ -204,7 +206,7 @@ The fields mean:
 - `moves` are indices into `U U' U2 R R' R2 F F' F2 D D' D2 L L' L2 B B' B2`.
 - `notation` is the same solution written out as moves.
 - `ms` is the server's search time.
-- `nodes` is the number of states the network scored.
+- `nodes` is the number of expanded states (summed over both searches for hybrid).
 - `verified` is the server's own check that the moves solve the state.
 
 The server rejects bad requests:
@@ -221,6 +223,9 @@ The server rejects bad requests:
 | `MAX_DEPTH` | 40 | longest solution the search tries, in moves |
 | `PORT` | 8765 | host port for `docker compose`; first port tried by `run.sh` |
 | `CHECKPOINT` | `/app/models/policy-v2.pt` | checkpoint inside the container (mount your own with `-v`) |
+| `BACKEND` | policy | container: `policy`, `hybrid` or `value`; launchers: `policy` or `hybrid` via `--backend` in `run.sh` and `-Backend` in `run.ps1` |
+| `VALUE_CHECKPOINT` | `/app/models/cost-to-go-v1.pt` | cost-to-go checkpoint for hybrid or value |
+| `ASTAR_NODES` | 200000 | positive integer A* expansion cap for hybrid or value; keep the policy default on CPU-only hosts |
 
 How to set them:
 
@@ -265,6 +270,88 @@ The test set is 1,000 uniformly random cube states:
 The first model (v1), trained on 1M rows, solved 96% with 29.5 moves at beam 4096. The model shipped here (v2),
 trained on 10M rows, solves 100% with 23.8 moves.
 
+## Hybrid solver
+
+The optional server backend `hybrid` first runs batched weighted A* with the cost-to-go network, using
+`f = 0.6*g + max(0, J(state))`, a batch of 1,000 and a cap of 200,000 expanded nodes. If A* exhausts that budget,
+the policy beam search solves the original state. Both models load once. Each solution is checked with the
+facelet and cubie models, then checked again by the server and page.
+
+On the same **200 uniformly random cubes** in the research comparison:
+
+| method | solved | mean moves (solved only) |
+|---|---|---|
+| cost-to-go A*, weight 0.6, cap 200,000 | 177/200 | 19.21 |
+| policy, beam 65,536 | 200/200 | 20.90 |
+| A* then policy at beam 65,536 | 200/200 | about 19.5 |
+
+On the 177 cubes both methods solved, the policy averaged 20.79 moves: A* was shorter on 132, equal on 32 and
+longer on 13. On the other 23 cubes, the policy averaged 21.74 moves. The shipped default fallback beam is
+**1,024**; the 19.5-move figure uses **65,536**, so it does not describe the default configuration or guarantee
+success on every cube.
+
+Hybrid is mainly recommended natively with `--device mps` on Apple silicon or `--device cuda` on an NVIDIA GPU:
+
+```sh
+python -m rubiks.serve --backend hybrid --checkpoint models/policy-v2.pt \
+  --value-checkpoint models/cost-to-go-v1.pt --astar-weight 0.6 --astar-nodes 200000 \
+  --astar-batch 1000 --beam 1024 --device mps --fallback none
+```
+
+To try hybrid in a CPU container, build a local image from this version:
+
+```sh
+./run.sh --backend hybrid
+BACKEND=hybrid docker compose up
+```
+
+In PowerShell: `.\run.ps1 -Backend hybrid`. For an existing image, pass `-e BACKEND=hybrid` to `docker run`.
+`ASTAR_NODES` overrides the container's expansion cap; see the CPU measurements below before reducing it.
+
+`--backend value --value-checkpoint models/cost-to-go-v1.pt` runs A* alone. `auto` continues to select policy
+when `--checkpoint` is provided. Policy remains the Docker and launcher default.
+
+`GET /solver` reports the policy `checkpoint`, `value_checkpoint`, `astar_weight`, `astar_nodes` and
+`astar_batch`, along with the beam settings. `POST /solve` keeps the existing contract and reports
+`solver: "hybrid: value-astar"` or `"hybrid: policy-beam (fallback)"`. It also returns `astar_ms`, `beam_ms`,
+`astar_expanded` and `beam_expanded` (actual expansion counts, whose sum is `nodes`); beam fields are zero when
+A* succeeds. The `/solver` field `astar_nodes` remains the configured cap. The remote solver on the page displays
+the returned source label.
+
+**Measured native macOS CPU timing (not in-container).** On this Mac (Apple silicon, macOS 26.5, 16 CPUs,
+PyTorch 2.14.1 using 12 threads), ten uniformly random cubes were built by calling
+`rubiks.cubie.random_cube(rng)` ten times with one
+`rng = np.random.default_rng(0)`. Policy alone and both hybrid caps used these same cubes, `device="cpu"`,
+beam 1,024 and maximum depth 40; hybrid used weight 0.6 and batch 1,000. Models were loaded and both networks
+warmed up before timing. Each returned solution was verified.
+
+| method | mean moves | mean A* seconds/cube | mean total seconds/cube | beam fallback share | solved |
+|---|---|---|---|---|---|
+| policy, beam 1,024 | 26.9 | — | 0.1738 | — | 10/10 |
+| hybrid, cap 200,000 | 21.6 | 29.9455 | 30.1874 | 3/10 (30%) | 10/10 |
+| hybrid, cap 50,000 | 26.0 | 8.5753 | 8.7421 | 9/10 (90%) | 10/10 |
+
+For CPU-only hosts, **keep the policy default**. Hybrid at 200,000 gives shorter solutions, but averaged about
+21 seconds per cube in the earlier native run (21.1205 s) and 30.1874 s in this repeat. At 50,000 it mostly falls
+back: its 26.0 moves are close to policy's 26.9, with a several-second delay. A separate Linux CPU-container
+measurement on the same Mac was **25–28 seconds per cube at 200,000 nodes**, slower than the earlier native
+run. CPU timing varies across runs and hosts; a 1-CPU container can take longer still.
+
+The Linux-container memory observation/estimate is roughly **0.7–1 GB RSS per active hybrid request**. Peak
+memory can be higher: this native benchmark reached **3.24 GB total process RSS**, including loaded models and
+allocator buffers. Allow additional memory headroom.
+
+The page waits at most **20 seconds**, including when the server is local. Both native 200,000-node averages
+exceed that limit. A page timeout does **not** cancel the server's work; repeated Solve clicks after a timeout
+queue behind the solver lock. Prefer hybrid natively with `--device mps` or `--device cuda`; for slower CPU
+solves, call the local server from a client with a longer timeout.
+
+The cost-to-go ONNX export is included for future browser support. It is 29,395,798 bytes with float16 weights,
+float32 computation and float32 I/O: `onehot[batch,324]` → `value[batch,1]`. ONNX Runtime CPU agreed with
+PyTorch fp32 within **0.0045747757** maximum absolute error on **2,000** uniformly random cubes (seed 0;
+required tolerance 0.01, relative tolerance zero). The full contract and measurement are in
+`models/cost-to-go-v1.onnx.json`. The current browser solver still uses the policy model.
+
 ## Repository layout
 
 ```
@@ -273,10 +360,15 @@ rubiks/              the Python package
   cubie.py           cubie-level model (corner/edge permutation and orientation), the independent cross-check
   sampling.py        random scrambles and uniformly random states
   data.py            one-hot encoding (54 x 6 = 324 inputs) and the training label
-  model.py           the MLP; checkpoint save / load
+  model.py           MLP and ResMLP; checkpoint save / load
   search.py          batched beam search and the greedy baseline
+  astar.py           batched weighted A* and value-guided greedy search
+  value_fn.py        cost-to-go inference and device move tables
   solver_nn.py       NNSolver: loads a checkpoint, runs the search, re-checks the answer
+  solver_value.py    ValueSolver: cost-to-go A* with input and solution checks
+  solver_hybrid.py   HybridSolver: A* then policy beam fallback
   serve.py           HTTP server: the page, GET /solver, POST /solve
+  export_onnx.py     export either network, optional fp16 weights, ONNX Runtime parity
   export_web.py      regenerates web/cube-tables.js from the Python model
 web/                 the page (see web/README.md)
   index.html         the page and its CSS

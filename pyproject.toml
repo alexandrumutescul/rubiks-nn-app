@@ -10,6 +10,7 @@ dependencies = ["numpy>=2", "torch>=2.4"]
 [project.optional-dependencies]
 kociemba = ["kociemba"]
 dev = ["pytest>=8"]
+export = ["onnx", "onnxruntime"]
 
 [project.scripts]
 rubiks-nn-serve = "rubiks.serve:main"

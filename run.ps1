@@ -11,6 +11,14 @@
   answer comes back verified; otherwise the script exits with an error and leaves the container running for
   docker logs rubiks-nn-app. If the app is already running (a container named rubiks-nn-app or labelled
   app=rubiks-nn-app), that copy gets the same checks (the first test cube only) and its address is printed instead.
+  BACKEND supplies the default backend when -Backend is omitted. ASTAR_NODES is the positive integer A* expanded-node
+  cap for hybrid (default 200000).
+
+.PARAMETER Backend
+  policy or hybrid (default $env:BACKEND or policy).
+
+.PARAMETER Help
+  Show usage, including the ASTAR_NODES environment setting, and exit.
 
 .EXAMPLE
   .\run.ps1
@@ -39,6 +47,9 @@ param(
     [ValidateRange(1, 65500)]
     [int]$Port = 8765,
 
+    # solver backend
+    [string]$Backend = 'policy',
+
     # beam width of the search (256 is faster, 4096 finds shorter solutions)
     [ValidateRange(1, 1000000)]
     [int]$Beam = 1024,
@@ -48,8 +59,21 @@ param(
     [int]$MaxDepth = 40,
 
     # open the page in the default browser once it is up
-    [switch]$Open
+    [switch]$Open,
+
+    [switch]$Help
 )
+
+if ($Help) {
+    Write-Output @'
+Usage: .\run.ps1 [start] [-Image IMAGE] [-Port N] [-Backend policy|hybrid] [-Beam N] [-MaxDepth N] [-Open]
+       .\run.ps1 stop
+       .\run.ps1 -Help
+Backend defaults to $env:BACKEND or policy; Beam defaults to 1024 and MaxDepth to 40.
+$env:ASTAR_NODES must be a positive integer A* expanded-node cap for hybrid (default 200000).
+'@
+    exit 0
+}
 
 # native commands report failure through $LASTEXITCODE, checked after each call
 $ErrorActionPreference = 'Continue'
@@ -59,6 +83,7 @@ $Label = 'app=rubiks-nn-app'   # on every launch; the app's container is found b
 $LocalImage = 'rubiks-nn-app'
 $PortSpan = 35
 $HealthTimeout = 60
+$AstarNodes = if ($null -ne $env:ASTAR_NODES) { $env:ASTAR_NODES } else { '200000' }
 $SolveTimeout = 30   # seconds each test solve may take
 $StopTimeout = 10    # seconds "stop" waits, after docker stop and docker rm, for the app's containers to be gone
 # The start-up test cubes, as states (54 colours). The first is one turn from solved, so it must come back solved at
@@ -105,6 +130,18 @@ sys.exit(4)
 function Fail([string]$Message) {
     Write-Host "run.ps1: $Message" -ForegroundColor Red
     exit 1
+}
+
+$BackendSource = '-Backend'
+if (-not $PSBoundParameters.ContainsKey('Backend')) {
+    $BackendSource = '$env:BACKEND'
+    if ($env:BACKEND) { $Backend = $env:BACKEND }
+}
+if ($Backend -cnotin @('policy', 'hybrid')) {
+    Fail "$BackendSource must be policy or hybrid, got '$Backend'"
+}
+if ($AstarNodes -notmatch '\A0*[1-9][0-9]*\z') {
+    Fail "`$env:ASTAR_NODES must be a positive integer, got '$AstarNodes'"
 }
 
 function Get-ContainerState([string]$Ref) {
@@ -185,7 +222,8 @@ function Test-PortBusy([int]$P) {
 function Test-Up([int]$P) {
     try {
         $info = Invoke-RestMethod -Uri "http://127.0.0.1:$P/solver" -TimeoutSec 3 -UseBasicParsing
-        return ($info.backend -eq 'policy')
+        $script:ReadyBackend = [string]$info.backend
+        return ($script:ReadyBackend -ne '')
     } catch { return $false }
 }
 
@@ -293,6 +331,9 @@ if ($running.Count -gt 0) {
     if ($ready -eq 'timeout') {
         Fail "$($c.Name) gives no answer on http://localhost:$runningPort/solver after $HealthTimeout s; $leftAsIs"
     }
+    if ($script:ReadyBackend -cne $Backend) {
+        Fail "running with backend $script:ReadyBackend; .\run.ps1 stop first"
+    }
     Invoke-FirstTestSolve $c.Id $leftAsIs
     Write-Host "$($c.Name) is already running: open http://localhost:$runningPort/"
     Write-Host '(stop it with .\run.ps1 stop)'
@@ -340,7 +381,7 @@ for ($p = $Port; $p -le $Port + $PortSpan; $p++) {
         Write-Host "port $p is in use, trying $($p + 1)"
         continue
     }
-    $out = & docker create --rm --name $Name --label $Label -p "${p}:8765" -e "BEAM=$Beam" -e "MAX_DEPTH=$MaxDepth" `
+    $out = & docker create --rm --name $Name --label $Label -p "${p}:8765" -e "BACKEND=$Backend" -e "ASTAR_NODES=$AstarNodes" -e "BEAM=$Beam" -e "MAX_DEPTH=$MaxDepth" `
         $Image 2>&1
     $code = $LASTEXITCODE
     $text = ($out | Out-String)
@@ -383,12 +424,12 @@ if ($chosen -eq 0) {
 
 # -- wait until it answers ---------------------------------------------------------------------------------------------
 $leftRunning = "the container is left running so you can look: docker logs $Name; stop it with .\run.ps1 stop"
-Write-Host "started $Name on port $chosen (beam $Beam, max depth $MaxDepth); waiting for the server ..."
+Write-Host "started $Name on port $chosen (backend $Backend, beam $Beam, max depth $MaxDepth); waiting for the server ..."
 $ready = Wait-Ready $started $chosen
 if ($ready -eq 'stopped') {
     Fail ("the container stopped during start-up; to see why, run it in the foreground:`n" +
           "  docker run --rm --name $Name --label $Label -p ${chosen}:8765 " +
-          "-e BEAM=$Beam -e MAX_DEPTH=$MaxDepth $Image")
+          "-e BACKEND=$Backend -e ASTAR_NODES=$AstarNodes -e BEAM=$Beam -e MAX_DEPTH=$MaxDepth $Image")
 }
 if ($ready -eq 'timeout') {
     Fail "no answer on http://localhost:$chosen/solver after $HealthTimeout s; $leftRunning"

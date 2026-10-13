@@ -12,10 +12,13 @@ services:
     ports:
       - "${PORT:-8765}:8765"
     environment:
+      BACKEND: "${BACKEND:-policy}"
+      ASTAR_NODES: "${ASTAR_NODES:-200000}"
+      VALUE_CHECKPOINT: "${VALUE_CHECKPOINT:-/app/models/cost-to-go-v1.pt}"
       BEAM: "${BEAM:-1024}"
       MAX_DEPTH: "${MAX_DEPTH:-40}"
     healthcheck:
-      test: ["CMD", "python", "-c", "import json, urllib.request; d = json.load(urllib.request.urlopen('http://127.0.0.1:8765/solver', timeout=4)); raise SystemExit(0 if d.get('backend') == 'policy' else 1)"]
+      test: ["CMD", "python", "-c", "import json, urllib.request; d = json.load(urllib.request.urlopen('http://127.0.0.1:8765/solver', timeout=4)); raise SystemExit(0 if d.get('backend') in ('policy', 'hybrid') else 1)"]
       interval: 10s
       timeout: 5s
       start_period: 60s

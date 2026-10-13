@@ -123,9 +123,33 @@ written as x - (max + log(sum)) gets wrong at the offset 1e30. The native and th
 can differ in the last bits of the logits, so the ONNX scrambles were chosen so that no decision of the search
 depended on a score gap smaller than 1e-4. GitHub Pages publishes the page together with the model.
 
-## What is next
+## The second method and hybrid
 
-The next step is a cost-to-go network that estimates how many moves a state is from solved, paired with A* search,
-to shorten the solutions. It is in training.
+Version 1.1 adds a 14,663,001-parameter residual cost-to-go network trained by a supervised warm start and
+approximate value iteration, paired with batched weighted A* (`f = 0.6*g + h`, 200,000 expanded nodes). On the
+same 200 random cubes, A* solved 177 at 19.21 moves on average; policy beam 65,536 solved all 200 at 20.90 moves
+(20.79 on the common 177, where A* was shorter on 132, equal on 32 and longer on 13; 21.74 on the remaining
+23). Running A* first and policy on exhaustion therefore solved all 200 at about 19.5 moves. The optional
+server backend `hybrid` implements that ordering with a default fallback beam of 1,024, reports the successful
+method and both search timings, and independently checks the final path. Policy remains the default. On ten
+seed-0 uniform cubes, the native macOS CPU comparison (Apple silicon, macOS 26.5, PyTorch 2.14.1, 12 threads;
+models loaded and warmed up; beam 1,024, maximum depth 40, A* batch 1,000) was:
+
+| method | mean moves | mean seconds/cube | beam fallback share | solved |
+|---|---|---|---|---|
+| policy, beam 1,024 | 26.9 | 0.1738 | — | 10/10 |
+| hybrid, cap 200,000 | 21.6 | 30.1874 | 3/10 (30%) | 10/10 |
+| hybrid, cap 50,000 | 26.0 | 8.7421 | 9/10 (90%) | 10/10 |
+
+These are native figures, not in-container. Keep policy on CPU-only hosts: 200,000 nodes gives shorter
+solutions but took about 21 seconds per cube in an earlier native run and 30.1874 seconds in this repeat;
+50,000 mostly falls back to policy with a several-second delay. A separate Linux CPU-container measurement
+on the same Mac was 25–28 seconds per cube at 200,000 nodes. The page's 20-second timeout applies to local
+servers too and does not cancel server work; subsequent Solve requests queue behind the lock. Hybrid is mainly
+recommended natively with `--device mps` or `--device cuda`; CPU clients need a longer timeout. The README
+also records the memory observations.
+
+The fp16-weight ONNX export is included for later browser A*, with float32 I/O and computation and a maximum
+absolute error of 0.0045747757 against PyTorch fp32 on 2,000 random cubes.
 
 One documented limit of the in-browser parity: the page normalises the logits in float64 and rounds to float32, while PyTorch normalises in float32 with its own reduction order. On every real scramble tested the two agree exactly; only an artificial exact tie between two candidate paths, within one float32 rounding step, could make the page pick a different, equally valid solution.

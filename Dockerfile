@@ -38,7 +38,10 @@ USER app
 # Search settings, read at start-up (docker run -e BEAM=256 ...). CHECKPOINT can point at a mounted file.
 ENV BEAM=1024 \
     MAX_DEPTH=40 \
-    CHECKPOINT=/app/models/policy-v2.pt
+    CHECKPOINT=/app/models/policy-v2.pt \
+    BACKEND=policy \
+    VALUE_CHECKPOINT=/app/models/cost-to-go-v1.pt \
+    ASTAR_NODES=200000
 
 EXPOSE 8765
 
@@ -47,10 +50,10 @@ STOPSIGNAL SIGINT
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python", "-c", \
-       "import json, urllib.request; d = json.load(urllib.request.urlopen('http://127.0.0.1:8765/solver', timeout=4)); raise SystemExit(0 if d.get('backend') == 'policy' else 1)"]
+       "import json, urllib.request; d = json.load(urllib.request.urlopen('http://127.0.0.1:8765/solver', timeout=4)); raise SystemExit(0 if d.get('backend') in ('policy', 'hybrid', 'value') else 1)"]
 
 # A tiny shell entrypoint so the environment variables apply; extra arguments to `docker run IMAGE ...` are appended
 # (a later flag wins, e.g. `docker run ... rubiks-nn-app --beam 256`).
 ENTRYPOINT ["/bin/sh", "-c", \
-            "exec python -m rubiks.serve --host 0.0.0.0 --port 8765 --web /app/web --backend policy --checkpoint \"$CHECKPOINT\" --beam \"$BEAM\" --max-depth \"$MAX_DEPTH\" --device cpu --fallback none \"$@\"", \
+            "case \"$BACKEND\" in policy) set -- --checkpoint \"$CHECKPOINT\" \"$@\" ;; hybrid) set -- --checkpoint \"$CHECKPOINT\" --value-checkpoint \"$VALUE_CHECKPOINT\" --astar-nodes \"$ASTAR_NODES\" \"$@\" ;; value) set -- --value-checkpoint \"$VALUE_CHECKPOINT\" --astar-nodes \"$ASTAR_NODES\" \"$@\" ;; *) printf 'BACKEND must be policy, hybrid, or value; got %s\\n' \"$BACKEND\" >&2; exit 2 ;; esac; exec python -m rubiks.serve --host 0.0.0.0 --port 8765 --web /app/web --backend \"$BACKEND\" --beam \"$BEAM\" --max-depth \"$MAX_DEPTH\" --device cpu --fallback none \"$@\"", \
             "rubiks-nn-app"]

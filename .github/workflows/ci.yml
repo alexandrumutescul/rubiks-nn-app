@@ -22,7 +22,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.4"
-          python -m pip install -e ".[dev]"
+          python -m pip install -e ".[dev,export]"
       - name: Check the model files
         run: cd models && sha256sum -c SHA256SUMS
       - name: Tests

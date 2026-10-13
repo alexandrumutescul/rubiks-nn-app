@@ -389,7 +389,7 @@ def test_unloadable_checkpoint_fails_at_startup(tmp_path):
 def test_value_backend_missing_module_fails_at_startup(tmp_path, monkeypatch, capsys):
     ckpt = tmp_path / "v.pt"
     ckpt.write_bytes(b"unused")
-    monkeypatch.setitem(sys.modules, "rubiks.solver_value", None)  # the module is absent (it lands on main later)
+    monkeypatch.setitem(sys.modules, "rubiks.solver_value", None)  # simulate a missing module
     argv = ["--web", str(tmp_path), "--backend", "value", "--checkpoint", str(ckpt), "--port", "0"]
     with pytest.raises(serve.BackendStartupError, match="rubiks.solver_value"):
         serve.build_backend(serve.parse_args(argv))
@@ -568,3 +568,117 @@ def test_http_nul_byte_in_a_static_path_is_404_and_the_server_keeps_answering(tm
             assert status == 404 and headers["access-control-allow-origin"] == "*"
         with opener.open(base + "/solver", timeout=5) as r:
             assert r.status == 200 and json.loads(r.read()) == b.info()
+
+
+@pytest.fixture
+def tiny_value_checkpoint(tmp_path):
+    import torch
+    from rubiks import model
+
+    torch.manual_seed(0)
+    path = tmp_path / "value.pt"
+    model.save_checkpoint(path, model.ResMLP(stem=(16, 8), blocks=1), {})
+    return path
+
+
+def hybrid_backend(policy, value, web, nodes=1):
+    args = serve.parse_args(["--web", str(web), "--backend", "hybrid", "--checkpoint", str(policy),
+                             "--value-checkpoint", str(value), "--astar-nodes", str(nodes), "--astar-batch", "1",
+                             "--beam", "18", "--max-depth", "3", "--device", "cpu", "--fallback", "none"])
+    return serve.build_backend(args)
+
+
+def test_hybrid_http_fallback_and_info(tiny_checkpoint, tiny_value_checkpoint, tmp_path):
+    backend = hybrid_backend(tiny_checkpoint, tiny_value_checkpoint, tmp_path)
+    expected = {"backend": "hybrid", "checkpoint": str(tiny_checkpoint), "value_checkpoint": str(tiny_value_checkpoint),
+                "beam": 18, "max_depth": 3, "device": "cpu", "fallback": "none",
+                "astar_weight": 0.6, "astar_nodes": 1, "astar_batch": 1}
+    assert backend.info() == expected
+    description = backend.describe()
+    assert str(tiny_checkpoint) in description and str(tiny_value_checkpoint) in description
+    assert "A* weight 0.6" in description and "nodes 1" in description and "batch 1" in description
+    state = cube.apply_sequence(cube.SOLVED, cube.parse_moves("R U"))
+    with serving(backend, tmp_path) as (opener, base):
+        with opener.open(base + "/solver", timeout=5) as response:
+            assert json.loads(response.read()) == expected
+        request = urllib.request.Request(base + "/solve", data=body(state),
+                                         headers={"Content-Type": "application/json"})
+        with opener.open(request, timeout=5) as response:
+            result = json.loads(response.read())
+    assert result["solver"] == "hybrid: policy-beam (fallback)"
+    assert result["verified"] and len(result["moves"]) == 2
+    assert result["astar_expanded"] == 1 and result["beam_expanded"] == 19 and result["nodes"] == 20
+    assert "astar_nodes" not in result and "beam_nodes" not in result
+    assert result["astar_ms"] > 0 and result["beam_ms"] > 0
+
+
+def test_hybrid_perfect_bfs_value_path(tiny_checkpoint, tiny_value_checkpoint, tmp_path):
+    import torch
+
+    backend = hybrid_backend(tiny_checkpoint, tiny_value_checkpoint, tmp_path, nodes=10)
+    distances = {cube.SOLVED.tobytes(): 0}
+    frontier = [cube.SOLVED]
+    for depth in (1, 2):
+        new = []
+        for row in np.stack(frontier)[:, cube.MOVE_PERMS].reshape(-1, 54):
+            if row.tobytes() not in distances:
+                distances[row.tobytes()] = depth
+                new.append(row)
+        frontier = new
+    backend.solver._value = lambda states: torch.tensor([distances.get(s.tobytes(), 3)
+                                                         for s in states.numpy()], dtype=torch.float32)
+    backend.solver._policy = lambda s: pytest.fail("beam must not run when A* solves")
+    state = cube.apply_sequence(cube.SOLVED, cube.parse_moves("R U"))
+    status, result = serve.handle_solve(body(state), backend)
+    assert status == 200 and result["verified"] and len(result["moves"]) == 2
+    assert result["solver"] == "hybrid: value-astar" and result["beam_ms"] == 0
+
+
+def test_hybrid_fallback_endpoint_without_socket(tiny_checkpoint, tiny_value_checkpoint, tmp_path):
+    backend = hybrid_backend(tiny_checkpoint, tiny_value_checkpoint, tmp_path)
+    state = cube.apply_sequence(cube.SOLVED, cube.parse_moves("R U"))
+    assert serve.handle_solver(backend)[1]["astar_nodes"] == 1
+    status, result = serve.handle_solve(body(state), backend)
+    assert status == 200 and result["verified"] and len(result["moves"]) == 2
+    assert result["solver"] == "hybrid: policy-beam (fallback)"
+    assert result["astar_ms"] > 0 and result["beam_ms"] > 0
+    assert result["nodes"] == result["astar_expanded"] + result["beam_expanded"] == 20
+    assert "astar_nodes" not in result and "beam_nodes" not in result
+
+
+def test_kociemba_runs_only_after_both_hybrid_searches_fail(tiny_checkpoint, tiny_value_checkpoint,
+                                                         tmp_path, stub_kociemba):
+    backend = hybrid_backend(tiny_checkpoint, tiny_value_checkpoint, tmp_path)
+    # STATE is six moves deep; neither the one-node A* nor the three-layer beam can solve it.
+    backend = serve.Backend(**{**vars(backend), "fallback": "kociemba"})
+    status, result = serve.handle_solve(body(STATE), backend)
+    assert status == 200 and result["verified"]
+    assert result["solver"] == "kociemba (fallback after hybrid: policy-beam (fallback))"
+    assert stub_kociemba.calls == [cube.to_facelet_string(STATE)]
+
+
+@pytest.mark.parametrize("flag", ["--checkpoint", "--value-checkpoint"])
+def test_value_backend_real_constructor(tiny_value_checkpoint, tmp_path, flag):
+    backend = serve.build_backend(serve.parse_args(["--web", str(tmp_path), "--backend", "value", flag,
+                                                    str(tiny_value_checkpoint), "--device", "cpu",
+                                                    "--astar-nodes", "1", "--fallback", "none"]))
+    assert backend.info()["value_checkpoint"] == str(tiny_value_checkpoint)
+    assert backend.info()["astar_nodes"] == 1 and backend.beam is None
+    status, result = serve.handle_solve(body(cube.apply_move(cube.SOLVED, 3)), backend)
+    assert status == 200 and result["solver"] == "value-astar" and result["verified"]
+
+
+@pytest.mark.parametrize("extra", [["--backend", "hybrid"], ["--astar-nodes", "0"],
+                                     ["--astar-batch", "0"], ["--astar-weight", "-1"],
+                                     ["--astar-weight", "nan"], ["--astar-weight", "inf"]])
+def test_hybrid_invalid_settings(tmp_path, extra):
+    with pytest.raises(SystemExit):
+        serve.parse_args(["--web", str(tmp_path), *extra])
+
+
+def test_hybrid_needs_both_checkpoints(tiny_checkpoint, tiny_value_checkpoint, tmp_path):
+    with pytest.raises(SystemExit):
+        serve.parse_args(["--web", str(tmp_path), "--backend", "hybrid", "--checkpoint", str(tiny_checkpoint)])
+    with pytest.raises(SystemExit):
+        serve.parse_args(["--web", str(tmp_path), "--backend", "hybrid",
+                           "--value-checkpoint", str(tiny_value_checkpoint)])

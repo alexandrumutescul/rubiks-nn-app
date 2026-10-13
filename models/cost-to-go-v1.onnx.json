@@ -1,0 +1,62 @@
+{
+  "format": "rubiks-nn value ONNX v1",
+  "file": "cost-to-go-v1.onnx",
+  "sha256": "3f933015377758c19931ec2c3d7bda857c394196eb49508a98b89329cbed2205",
+  "bytes": 29395798,
+  "input": {
+    "name": "onehot",
+    "dtype": "float32",
+    "shape": [
+      "batch",
+      324
+    ]
+  },
+  "output": {
+    "name": "value",
+    "dtype": "float32",
+    "shape": [
+      "batch",
+      1
+    ],
+    "semantics": "raw cost-to-go in half-turn moves; clamp at 0 for A*"
+  },
+  "encoding": "one-hot 54x6 row-major, feature = position*6 + colour",
+  "facelet_order": "Kociemba URFDLB, facelet = face*9 + row*3 + col, solved colour = facelet // 9",
+  "weights_dtype": "float16",
+  "compute_dtype": "float32",
+  "opset": 17,
+  "exporter": "torch.onnx (TorchScript)",
+  "model": {
+    "arch": "resnet",
+    "in_features": 324,
+    "stem": [
+      5000,
+      1000
+    ],
+    "blocks": 4,
+    "out_features": 1,
+    "norm": "batch",
+    "activation": "relu"
+  },
+  "parameters": 14663001,
+  "checkpoint": "models/cost-to-go-v1.pt",
+  "checkpoint_sha256": "9bfdaafcd3ad4660c7d38f97035cd0e2c6d8de0060e544e622d0b7f3908262c5",
+  "torch_version": "2.14.1",
+  "check": {
+    "n": 2000,
+    "seed": 0,
+    "distribution": "rubiks.cubie.random_cube: uniformly random cubes",
+    "batch_sizes": [
+      256,
+      208,
+      7,
+      1
+    ],
+    "max_abs_diff": 0.004574775695800781,
+    "tol": 0.01,
+    "rtol": 0,
+    "onnxruntime_version": "1.31.0",
+    "provider": "CPUExecutionProvider",
+    "reference_dtype": "torch float32"
+  }
+}

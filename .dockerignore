@@ -16,3 +16,6 @@ run.sh
 run.ps1
 # a local copy of the model in web/model/ stays out; the Dockerfile copies it there from models/
 web/model/*.onnx
+# The server uses the cost-to-go PyTorch checkpoint; its browser export is not needed.
+models/cost-to-go-v1.onnx
+models/cost-to-go-v1.onnx.json

@@ -62,10 +62,14 @@ Options:
   --image IMAGE     use this image instead of building one here, e.g.
                     --image $PUBLISHED_IMAGE
   --port N          first host port to try (default \$PORT or 8765); N .. N+$PORT_SPAN are tried in turn
+  --backend NAME    policy or hybrid (default \$BACKEND or policy)
   --beam N          beam width of the search (default \$BEAM or 1024; 256 is faster, 4096 finds shorter solutions)
   --max-depth N     longest solution the search tries (default \$MAX_DEPTH or 40)
   --open            open the page in the default browser once it is up
   -h, --help        this help
+
+Environment:
+  ASTAR_NODES      positive integer A* expanded-node cap for hybrid (default 200000)
 
 Without --image the image is built from this directory (docker build -t $LOCAL_IMAGE .); the first build downloads
 the Python base image and the CPU build of PyTorch, later builds are cached.
@@ -83,6 +87,9 @@ is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 COMMAND=start
 IMAGE=""
 FIRST_PORT="${PORT:-8765}"
+BACKEND="${BACKEND:-policy}"
+BACKEND_SOURCE='$BACKEND'
+ASTAR_NODES="${ASTAR_NODES-200000}"
 BEAM="${BEAM:-1024}"
 MAX_DEPTH="${MAX_DEPTH:-40}"
 OPEN=0
@@ -93,6 +100,8 @@ while [ $# -gt 0 ]; do
     --image=*) IMAGE="${1#*=}" ;;
     --port) [ $# -ge 2 ] || die "--port needs a value"; FIRST_PORT="$2"; shift ;;
     --port=*) FIRST_PORT="${1#*=}" ;;
+    --backend) [ $# -ge 2 ] || die "--backend needs a value"; BACKEND="$2"; BACKEND_SOURCE=--backend; shift ;;
+    --backend=*) BACKEND="${1#*=}"; BACKEND_SOURCE=--backend ;;
     --beam) [ $# -ge 2 ] || die "--beam needs a value"; BEAM="$2"; shift ;;
     --beam=*) BEAM="${1#*=}" ;;
     --max-depth) [ $# -ge 2 ] || die "--max-depth needs a value"; MAX_DEPTH="$2"; shift ;;
@@ -106,6 +115,8 @@ done
 
 is_uint "$FIRST_PORT" && [ "$FIRST_PORT" -ge 1 ] && [ "$FIRST_PORT" -le $((65535 - PORT_SPAN)) ] ||
   die "--port must be a number from 1 to $((65535 - PORT_SPAN)), got '$FIRST_PORT'"
+case "$BACKEND" in policy | hybrid) ;; *) die "$BACKEND_SOURCE must be policy or hybrid, got '$BACKEND'" ;; esac
+[[ "$ASTAR_NODES" =~ ^0*[1-9][0-9]*$ ]] || die "\$ASTAR_NODES must be a positive integer, got '$ASTAR_NODES'"
 is_uint "$BEAM" && [ "$BEAM" -ge 1 ] || die "--beam must be a whole number >= 1, got '$BEAM'"
 is_uint "$MAX_DEPTH" && [ "$MAX_DEPTH" -ge 1 ] || die "--max-depth must be a whole number >= 1, got '$MAX_DEPTH'"
 LAST_PORT=$((FIRST_PORT + PORT_SPAN))
@@ -170,16 +181,18 @@ http_get() {  # body of a GET, or a failure; status 2 when neither curl nor wget
   fi
 }
 
-# is_up PORT ID: GET /solver on host port PORT answers for the policy network (container ID)
+# is_up PORT ID: GET /solver answers; keep its backend for the reuse check.
+READY_BACKEND=""
 is_up() {
   local body rc=0
   body="$(http_get "http://127.0.0.1:$1/solver")" || rc=$?
-  if [ "$rc" = 2 ]; then  # no HTTP client here: rely on the image's own health check
-    [ "$(docker container inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$2" \
-           2>/dev/null)" = healthy ]
-    return
+  if [ "$rc" = 2 ]; then  # no HTTP client here: use the image's own Python
+    rc=0
+    body="$(docker exec "$2" python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8765/solver", timeout=3).read().decode())' 2>/dev/null)" || rc=$?
   fi
-  [ "$rc" = 0 ] && printf '%s' "$body" | grep '"backend": "policy"' >/dev/null
+  [ "$rc" = 0 ] || return 1
+  READY_BACKEND="$(printf '%s' "$body" | sed -n 's/.*"backend"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  [ -n "$READY_BACKEND" ]
 }
 
 # wait_ready ID PORT: waits up to HEALTH_TIMEOUT s until is_up; 0 = it answers, 1 = the container is no longer
@@ -278,6 +291,7 @@ if [ -n "$running" ]; then
       ;;
     *) die "$cname gives no answer on http://localhost:$port/solver after ${HEALTH_TIMEOUT} s; $left_as_is" ;;
   esac
+  [ "$READY_BACKEND" = "$BACKEND" ] || die "running with backend $READY_BACKEND; ./run.sh stop first"
   first_test_solve "$id" "$left_as_is"
   echo "$cname is already running: open http://localhost:$port/"
   echo "(stop it with ./run.sh stop)"
@@ -341,7 +355,7 @@ STARTED_ID=""
 try_run() {
   local p="$1" out id
   if ! out="$(docker create --rm --name "$NAME" --label "$LABEL" -p "$p:8765" \
-                -e BEAM="$BEAM" -e MAX_DEPTH="$MAX_DEPTH" "$IMAGE" 2>&1)"; then
+                -e BACKEND="$BACKEND" -e ASTAR_NODES="$ASTAR_NODES" -e BEAM="$BEAM" -e MAX_DEPTH="$MAX_DEPTH" "$IMAGE" 2>&1)"; then
     if printf '%s\n' "$out" | grep -i 'already in use by' >/dev/null; then return 3; fi
     printf '%s\n' "$out" >&2
     return 2
@@ -396,14 +410,14 @@ done
 # -- wait until it answers -----------------------------------------------------------------------------------------
 LEFT_RUNNING="the container is left running so you can look: docker logs $NAME; stop it with ./run.sh stop"
 
-echo "started $NAME on port $port (beam $BEAM, max depth $MAX_DEPTH); waiting for the server ..."
+echo "started $NAME on port $port (backend $BACKEND, beam $BEAM, max depth $MAX_DEPTH); waiting for the server ..."
 rc=0
 wait_ready "$STARTED_ID" "$port" || rc=$?
 case "$rc" in
   0) ;;
   1)
     die "the container stopped during start-up; to see why, run it in the foreground:
-  docker run --rm --name $NAME --label $LABEL -p $port:8765 -e BEAM=$BEAM -e MAX_DEPTH=$MAX_DEPTH $IMAGE"
+  docker run --rm --name $NAME --label $LABEL -p $port:8765 -e BACKEND=$BACKEND -e ASTAR_NODES=$ASTAR_NODES -e BEAM=$BEAM -e MAX_DEPTH=$MAX_DEPTH $IMAGE"
     ;;
   *) die "no answer on http://localhost:$port/solver after ${HEALTH_TIMEOUT} s; $LEFT_RUNNING" ;;
 esac

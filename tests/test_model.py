@@ -76,3 +76,25 @@ def test_checkpoint_round_trip(tmp_path, states):
 def test_resolve_device():
     assert model.resolve_device("cpu") == torch.device("cpu")
     assert model.resolve_device("auto").type in ("cpu", "cuda", "mps")
+
+
+@pytest.mark.parametrize("norm", ["batch", "layer", None])
+def test_resmlp_checkpoint_round_trip(tmp_path, states, norm):
+    torch.manual_seed(1)
+    net = model.ResMLP(stem=(32, 16), blocks=2, norm=norm).eval()
+    path = tmp_path / "resnet.pt"
+    model.save_checkpoint(path, net, {}, iteration=42)
+    loaded, checkpoint = model.load_checkpoint(path, "cpu")
+    assert isinstance(loaded, model.ResMLP) and not loaded.training
+    assert checkpoint["iteration"] == 42
+    assert loaded.config() == net.config() and loaded.config()["arch"] == "resnet"
+    with torch.inference_mode():
+        assert torch.equal(net.logits_from_uint8(states), loaded.logits_from_uint8(states))
+    assert loaded.out_features == 1
+
+
+def test_arch_dispatch():
+    assert isinstance(model.build_model({"arch": "mlp", "hidden": [8]}), model.MLP)
+    assert isinstance(model.build_model({"hidden": [8]}), model.MLP)
+    with pytest.raises(ValueError, match="unknown model arch"):
+        model.build_model({"arch": "unknown"})
