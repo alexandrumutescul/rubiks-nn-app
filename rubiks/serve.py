@@ -5,10 +5,13 @@ Standard library plus numpy; a network backend also needs torch, imported only w
 * ``GET /...``     serves the ``--web`` directory statically (``/`` -> ``index.html``). Every target is resolved with
   symlinks followed and must lie inside the resolved ``--web`` root (404 otherwise); no directory listings.
 * ``GET /solver``  what answers ``/solve``: ``{"backend", "checkpoint", "beam", "max_depth", "device", "fallback"}``
-  (null where it does not apply).
+  (null where it does not apply). Value and hybrid also report ``value_checkpoint``, ``astar_weight``,
+  ``astar_nodes`` (the expansion cap) and ``astar_batch``; value has null beam and max_depth fields.
 * ``POST /solve``  body ``{"state": [54 ints]}`` -> ``{"moves": [...], "solver": ..., "ms": ..., "verified": ...}``
   (move indices, the order of ``rubiks.cube.MOVE_NAMES``), plus ``"nodes"`` (int) and ``"notation"`` (str) when the
-  backend reports them, or ``{"error": ...}`` with status 400 / 413 / 500 / 501.
+  backend reports them. Hybrid adds ``astar_expanded``, ``beam_expanded`` (actual expansion counts),
+  ``astar_ms`` and ``beam_ms`` (beam fields are zero when A* succeeds).
+  Errors are ``{"error": ...}`` with status 400 / 413 / 500 / 501.
 * ``OPTIONS``      answers CORS preflights, so a page opened as ``file://`` can call ``/solve``.
 * A GET / HEAD / POST whose request target ``urllib.parse.urlsplit`` cannot parse (e.g. ``GET http://[``) is answered
   400 ``{"error": "bad request target"}`` (:func:`split_target`); valid targets are routed as before.
@@ -18,15 +21,17 @@ The state is validated with ``rubiks.cubie.from_facelets(...).is_valid()``, then
 
 * ``policy``   the trained policy network with beam search (``rubiks.solver_nn.NNSolver``; ``--checkpoint``,
   ``--beam``, ``--max-depth``, ``--device``);
-* ``value``    the cost-to-go network (``rubiks.solver_value.ValueSolver``, same ``solve()`` contract); start-up fails
-  with a clear message while that module is not in the checkout;
-* ``kociemba`` the ``kociemba`` package (an optional dependency, deliberately not in pyproject);
+* ``value``    the cost-to-go network with batched weighted A* (``rubiks.solver_value.ValueSolver``);
+* ``hybrid``   cost-to-go A* first, then policy beam search if A* exhausts its node budget;
+* ``kociemba`` the ``kociemba`` package (available through the optional ``kociemba`` extra);
 * ``none``     ``/solve`` answers 501 ``{"error": "no solver backend"}``;
 * ``auto``     (default) ``policy`` when ``--checkpoint`` is given, else ``kociemba`` when importable, else ``none``.
 
 Fallback rule: when a network backend answers ``{"error": "no solution found within ..."}``, ``--fallback kociemba``
 (default) is set and the package imports, kociemba solves the state and the answer is named
-``"kociemba (fallback after policy-beam)"``. Any other backend error is a 500 carrying the message. Whatever the
+``"kociemba (fallback after policy-beam)"`` for policy, or
+``"kociemba (fallback after hybrid: policy-beam (fallback))"`` after both hybrid searches exhaust their limits.
+Any other backend error is a 500 carrying the message. Whatever the
 backend, the server applies the returned moves itself (``rubiks.cube``) to the request state as received (every
 solver, the fallback included, works on its own copy) and reports the result as ``"verified"``; a non-solving answer
 is returned with ``"verified": false``, never hidden. :func:`_backend_solve` is the plug-in point.
@@ -38,6 +43,7 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import math
 import os
 import sys
 import threading
@@ -56,7 +62,7 @@ from . import cube, cubie
 MAX_BODY_BYTES = 64 * 1024
 _SOLVER_LOCK = threading.Lock()  # one backend call at a time (the kociemba C extension is not known thread-safe)
 
-BACKEND_CHOICES = ("auto", "policy", "value", "kociemba", "none")
+BACKEND_CHOICES = ("auto", "policy", "value", "hybrid", "kociemba", "none")
 FALLBACK_CHOICES = ("kociemba", "none")
 NO_SOLUTION_PREFIX = "no solution found within"  # the network solvers' "search exhausted" error
 BAD_TARGET = (400, {"error": "bad request target"})  # the answer to a request target split_target cannot parse
@@ -77,7 +83,7 @@ class BackendStartupError(RuntimeError):
 @dataclass(frozen=True)
 class Backend:
     """What answers POST /solve. ``solver`` is the network solver (``.solve(state) -> dict``, see
-    ``rubiks.solver_nn``) for ``policy`` / ``value`` and None for ``kociemba`` / ``none``. The other fields are what
+    ``rubiks.solver_nn``) for ``policy`` / ``value`` / ``hybrid`` and None for ``kociemba`` / ``none``. The other fields are what
     GET /solver reports; ``fallback`` is the fallback that is live (``"kociemba"`` or ``"none"``)."""
 
     name: str
@@ -87,10 +93,18 @@ class Backend:
     max_depth: int | None = None
     device: str | None = None
     fallback: str = "none"
+    value_checkpoint: str | None = None
+    astar_weight: float | None = None
+    astar_nodes: int | None = None
+    astar_batch: int | None = None
 
     def info(self) -> dict:
-        return {"backend": self.name, "checkpoint": self.checkpoint, "beam": self.beam,
+        info = {"backend": self.name, "checkpoint": self.checkpoint, "beam": self.beam,
                 "max_depth": self.max_depth, "device": self.device, "fallback": self.fallback}
+        if self.name in ("value", "hybrid"):
+            info.update(value_checkpoint=self.value_checkpoint, astar_weight=self.astar_weight,
+                        astar_nodes=self.astar_nodes, astar_batch=self.astar_batch)
+        return info
 
     def describe(self) -> str:
         """One line for the start-up banner."""
@@ -99,14 +113,18 @@ class Backend:
         if self.solver is None:
             return self.name
         source = getattr(self.solver, "source", self.name)
-        return (f"{self.name} ({source})  checkpoint {self.checkpoint}  beam {self.beam}  max depth {self.max_depth}  "
-                f"device {self.device}  fallback {self.fallback}")
+        description = (f"{self.name} ({source})  checkpoint {self.checkpoint}  beam {self.beam}  "
+                       f"max depth {self.max_depth}  device {self.device}  fallback {self.fallback}")
+        if self.name in ("value", "hybrid"):
+            description += (f"  value checkpoint {self.value_checkpoint}  A* weight {self.astar_weight}  "
+                            f"nodes {self.astar_nodes}  batch {self.astar_batch}")
+        return description
 
 
 def _import_kociemba():
     """The optional ``kociemba`` module, or None when it cannot be imported."""
     try:
-        import kociemba  # optional: installed in the dev venv only, never a declared dependency
+        import kociemba  # optional: installed through the kociemba extra
     except ImportError:
         return None
     return kociemba
@@ -130,7 +148,9 @@ def _is_move_index(m) -> bool:
 def _backend_solve(state: np.ndarray, backend: Backend | None = None) -> tuple[list[int], str, dict]:
     """Solve a valid, unsolved state; returns (move indices, solver name, extra response fields). THE PLUG-IN POINT.
 
-    ``extra`` holds ``"nodes"`` and ``"notation"`` when a network backend reports them. Raises _NoBackend (-> 501),
+    ``extra`` holds ``"nodes"`` and ``"notation"`` when a network backend reports them, plus hybrid's
+    ``"astar_expanded"``, ``"beam_expanded"``, ``"astar_ms"`` and ``"beam_ms"``.
+    Raises _NoBackend (-> 501),
     _BackendError (-> 500) or whatever the backend raises (-> 500). The moves are NOT verified here; handle_solve does
     that and reports the result.
 
@@ -169,6 +189,12 @@ def _backend_solve(state: np.ndarray, backend: Backend | None = None) -> tuple[l
         extra["nodes"] = int(result["nodes"])
     if result.get("notation") is not None:
         extra["notation"] = str(result["notation"])
+    for field in ("astar_ms", "beam_ms"):
+        if result.get(field) is not None:
+            extra[field] = float(result[field])
+    for field in ("astar_expanded", "beam_expanded"):
+        if result.get(field) is not None:
+            extra[field] = int(result[field])
     return [int(m) for m in moves], source, extra
 
 
@@ -414,11 +440,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--web", type=Path, default=Path("web"), help="directory served statically (default web)")
     p.add_argument("--backend", choices=BACKEND_CHOICES, default="auto",
                    help="what answers POST /solve: policy (the trained policy network with beam search; needs "
-                        "--checkpoint), value (the cost-to-go network; needs rubiks.solver_value and --checkpoint), "
+                        "--checkpoint), value (A*; needs --value-checkpoint or --checkpoint), "
+                        "hybrid (A* then policy; needs both checkpoints), "
                         "kociemba, none (501). Default auto: policy when --checkpoint is given, else kociemba when "
                         "importable, else none")
     p.add_argument("--checkpoint", type=Path, default=None,
-                   help="network checkpoint (best.pt of a training run), loaded once at start-up")
+                   help="policy checkpoint (also for hybrid), loaded once at start-up; "
+                        "legacy alias for --value-checkpoint with --backend value")
+    p.add_argument("--value-checkpoint", type=Path, default=None, help="cost-to-go checkpoint for value or hybrid")
+    p.add_argument("--astar-weight", type=float, default=0.6, help="A* priority = weight*g + h (default 0.6)")
+    p.add_argument("--astar-nodes", type=int, default=200000, help="A* expanded-node cap (default 200000)")
+    p.add_argument("--astar-batch", type=int, default=1000, help="A* nodes popped per batch (default 1000)")
     p.add_argument("--beam", type=int, default=1024, help="beam width of the network search (default 1024)")
     p.add_argument("--max-depth", type=int, default=40,
                    help="longest solution the network search tries, in moves (default 40)")
@@ -430,10 +462,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if not args.web.is_dir():
         p.error(f"--web {args.web} is not a directory")
-    if args.backend in NETWORK_FACTORIES and args.checkpoint is None:
+    if args.backend in ("policy", "hybrid") and args.checkpoint is None:
         p.error(f"--backend {args.backend} needs --checkpoint")
+    if args.backend == "hybrid" and args.value_checkpoint is None:
+        p.error("--backend hybrid needs --value-checkpoint")
+    if args.backend == "value" and args.value_checkpoint is None and args.checkpoint is None:
+        p.error("--backend value needs --value-checkpoint or --checkpoint")
+    if args.backend == "value" and args.value_checkpoint is not None and args.checkpoint is not None:
+        p.error("--backend value takes --value-checkpoint or --checkpoint, not both")
+    if args.value_checkpoint is not None:
+        if args.backend not in ("value", "hybrid"):
+            p.error("--value-checkpoint is only used by value or hybrid")
+        if not args.value_checkpoint.is_file():
+            p.error(f"--value-checkpoint {args.value_checkpoint} is not a file")
+    if not math.isfinite(args.astar_weight) or args.astar_weight < 0:
+        p.error("--astar-weight must be finite and >= 0")
+    if args.astar_nodes < 1 or args.astar_batch < 1:
+        p.error("--astar-nodes and --astar-batch must be >= 1")
     if args.checkpoint is not None and args.backend in ("kociemba", "none"):
-        p.error(f"--checkpoint is only used by a network backend (policy, value, auto), not --backend {args.backend}")
+        p.error(f"--checkpoint is only used by a network backend, not --backend {args.backend}")
     if args.checkpoint is not None and not args.checkpoint.is_file():
         p.error(f"--checkpoint {args.checkpoint} is not a file")
     if args.beam < 1:
@@ -451,16 +498,22 @@ def _make_policy(args: argparse.Namespace):
 
 def _make_value(args: argparse.Namespace):
     try:
-        from .solver_value import ValueSolver  # lands on main later; same solve() contract, source "value-astar"
+        from .solver_value import ValueSolver
     except ImportError as exc:
         raise BackendStartupError(
-            f"--backend value needs rubiks.solver_value.ValueSolver, which cannot be imported ({exc}); the value "
-            "method is not in this checkout yet, use --backend policy") from None
-    # [assumed] the same constructor keywords as NNSolver; a mismatch fails here, at start-up, with the message
-    return ValueSolver(args.checkpoint, device=args.device, width=args.beam, max_depth=args.max_depth)
+            f"--backend value needs rubiks.solver_value.ValueSolver, which cannot be imported ({exc})") from None
+    return ValueSolver(args.value_checkpoint or args.checkpoint, device=args.device, weight=args.astar_weight,
+                       batch=args.astar_batch, max_nodes=args.astar_nodes)
 
 
-NETWORK_FACTORIES = {"policy": _make_policy, "value": _make_value}  # name -> factory(args) -> solver with .solve()
+def _make_hybrid(args: argparse.Namespace):
+    from .solver_hybrid import HybridSolver
+
+    return HybridSolver(args.value_checkpoint, args.checkpoint, device=args.device, weight=args.astar_weight,
+                        batch=args.astar_batch, max_nodes=args.astar_nodes, beam=args.beam, max_depth=args.max_depth)
+
+
+NETWORK_FACTORIES = {"policy": _make_policy, "value": _make_value, "hybrid": _make_hybrid}
 
 
 def resolve_backend_name(args: argparse.Namespace) -> str:
@@ -488,14 +541,22 @@ def build_backend(args: argparse.Namespace) -> Backend:
     except BackendStartupError:
         raise
     except Exception as exc:  # noqa: BLE001 - reported at start-up with the cause, never swallowed
-        message = f"--backend {name}: cannot load {args.checkpoint}: {type(exc).__name__}: {exc}"
+        message = (f"--backend {name}: cannot load checkpoint(s) {args.checkpoint}, {args.value_checkpoint}: "
+                   f"{type(exc).__name__}: {exc}")
         raise BackendStartupError(message) from exc
     fallback = args.fallback
     if fallback == "kociemba" and _import_kociemba() is None:
         fallback = "none"  # what is live; main() says why in the banner
     device = getattr(solver, "device", None)
-    return Backend(name, solver=solver, checkpoint=str(args.checkpoint), beam=args.beam, max_depth=args.max_depth,
-                   device=str(device) if device is not None else args.device, fallback=fallback)
+    value_path = (args.value_checkpoint or args.checkpoint) if name in ("value", "hybrid") else None
+    checkpoint = value_path if name == "value" else args.checkpoint
+    return Backend(name, solver=solver, checkpoint=str(checkpoint), beam=args.beam if name != "value" else None,
+                   max_depth=args.max_depth if name != "value" else None,
+                   device=str(device) if device is not None else args.device, fallback=fallback,
+                   value_checkpoint=str(value_path) if value_path is not None else None,
+                   astar_weight=args.astar_weight if value_path is not None else None,
+                   astar_nodes=args.astar_nodes if value_path is not None else None,
+                   astar_batch=args.astar_batch if value_path is not None else None)
 
 
 def main(argv: list[str] | None = None) -> int:
